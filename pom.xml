@@ -4,8 +4,8 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.tensor</groupId>
-    <artifactId>java-tensor</artifactId>
+    <groupId>com.jtensor</groupId>
+    <artifactId>jtensor</artifactId>
     <version>1.0-SNAPSHOT</version>
 
     <properties>
