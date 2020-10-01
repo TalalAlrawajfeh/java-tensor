@@ -1679,10 +1679,4 @@ class Tensor<T> {
                     isView);
         }
     }
-
-    public static void main(String[] args) {
-        Tensor<Integer> tensor = new Tensor<>(Integer.class, new int[]{2, 3, 2},
-                new Integer[]{3, 6, 4, 11, 9, 11, 8, 11, 11, 11, 9, 10});
-        System.out.println(argMin(tensor, 0, false));
-    }
 }
