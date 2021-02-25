@@ -2,12 +2,15 @@ package com.tensor;
 
 
 import java.lang.reflect.Array;
+import java.nio.*;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Objects;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
+
+import static com.tensor.DataType.*;
 
 /*
   @author talalalrawajfeh@gmail.com
@@ -714,6 +717,19 @@ public class JTensor<T> {
     }
 
     /**
+     * @param tensor    another tensor
+     * @param dimension the dimension to concatenate along
+     * @return A tensor that is the concatenation of the original and another tensor along the given dimension. Both tensors
+     * must have the same shape except on the dimension of concatenation.
+     * @throws InvalidArgumentException when the number of dimensions of the first tensor is not equal to the number of
+     *                                  dimensions of the second tensor. Or the shapes of the tensors are not equal on the dimensions other than the
+     *                                  concatenation dimension.
+     */
+    public JTensor<T> concatenate(JTensor<T> tensor, int dimension) {
+        return concatenate(this, tensor, dimension);
+    }
+
+    /**
      * @param mask a boolean tensor acting as a mask to extract the specific items/arrays from the tensor
      * @return a tensor that is the result of applying the mask to the tensor. The shapes of the first n
      * dimensions of the tensor must be equal to the shapes of the mask dimensions where n is the number of dimensions
@@ -831,6 +847,22 @@ public class JTensor<T> {
             result.setItem(indices, binaryOperation.apply(first.getItem(indices), second.getItem(indices)));
         }
         return result;
+    }
+
+    /**
+     * @param tensor          another tensor
+     * @param binaryOperation a function that takes the class of the generic type and the two values and returns a new
+     *                        value. The class of the generic type is needed since the Java language doesn't provide any
+     *                        mechanism to check the given generic type at runtime. For example, this is needed when the
+     *                        add operation is required and the numbers could be of class Integer or Double, etc. for
+     *                        which the specific type must be known to perform the addition operation for that type.
+     * @return a new tensor as a result of applying the binary operation on the corresponding items of the two tensors.
+     * tensors are broadcasted if there shapes are not equal but are compatible.
+     */
+    public <B> JTensor<B> applyBinaryOperation(Class<B> resultType,
+                                               JTensor<T> tensor,
+                                               BiFunction<T, T, B> binaryOperation) {
+        return applyBinaryOperation(resultType, this, tensor, binaryOperation);
     }
 
     /**
@@ -1065,6 +1097,20 @@ public class JTensor<T> {
      */
     public JTensor<T> replace(Predicate<T> replacePredicate, Function<T, T> replacer) {
         return map(type, x -> replacePredicate.test(x) ? x : replacer.apply(x));
+    }
+
+    /**
+     * @param dimension the dimension at witch to insert a new dimension of shape 1.
+     * @return a tensor with an additional dimension of shape 1 inserted at the given dimension index.
+     */
+    public JTensor<T> expand(int dimension) {
+        int[] expandedShape = new int[this.shape.length + 1];
+
+        System.arraycopy(this.shape, 0, expandedShape, 0, dimension);
+        expandedShape[dimension] = 1;
+        System.arraycopy(this.shape, dimension, expandedShape, dimension + 1, this.shape.length - dimension);
+
+        return this.reshape(expandedShape);
     }
 
     /**
@@ -1445,6 +1491,17 @@ public class JTensor<T> {
     }
 
     /**
+     * @return a pair of tensors with the same shape as a result of broadcasting either one of the tensors or both
+     * according to broadcasting rules. The pair of tensors correspond to the parameters with the same order.
+     * For more on the broadcasting rules used, see NumPy's general broadcasting rules:
+     * https://numpy.org/doc/stable/user/basics.broadcasting.html.
+     * @throws InvalidArgumentException if the shapes of the tensors are not compatible.
+     */
+    public <B> Pair<JTensor<T>, JTensor<B>> broadcast(JTensor<B> tensor) {
+        return broadcast(this, tensor);
+    }
+
+    /**
      * Checks for the compatibility of the shapes according to NumPy's general broadcasting rules:
      * https://numpy.org/doc/stable/user/basics.broadcasting.html.
      */
@@ -1577,6 +1634,304 @@ public class JTensor<T> {
                 indices.length);
     }
 
+    /**
+     * @return returns a FloatBuffer object containing the tensor's data
+     */
+    public FloatBuffer toFloatBuffer() {
+        if (Float.class.equals(this.type)) {
+            Float[] data = (Float[]) this.data;
+            FloatBuffer floatBuffer = FloatBuffer.allocate(data.length);
+            for (Float x : data) {
+                floatBuffer.put(x);
+            }
+            floatBuffer.position(0);
+            return floatBuffer;
+        }
+        throw new InvalidTypeException("type of the tensor is not Float");
+    }
+
+    /**
+     * @return returns a LongBuffer object containing the tensor's data
+     */
+    public LongBuffer toLongBuffer() {
+        if (Long.class.equals(this.type)) {
+            Long[] data = (Long[]) this.data;
+            LongBuffer longBuffer = LongBuffer.allocate(data.length);
+            for (Long x : data) {
+                longBuffer.put(x);
+            }
+            longBuffer.position(0);
+            return longBuffer;
+        }
+        throw new InvalidTypeException("type of the tensor is not Long");
+    }
+
+    /**
+     * @return returns a DoubleBuffer object containing the tensor's data
+     */
+    public DoubleBuffer toDoubleBuffer() {
+        if (Double.class.equals(this.type)) {
+            Double[] data = (Double[]) this.data;
+            DoubleBuffer doubleBuffer = DoubleBuffer.allocate(data.length);
+            for (Double x : data) {
+                doubleBuffer.put(x);
+            }
+            doubleBuffer.position(0);
+            return doubleBuffer;
+        }
+        throw new InvalidTypeException("type of the tensor is not Double");
+    }
+
+    /**
+     * @return returns a IntBuffer object containing the tensor's data
+     */
+    public IntBuffer toIntBuffer() {
+        if (Integer.class.equals(this.type)) {
+            Integer[] data = (Integer[]) this.data;
+            IntBuffer intBuffer = IntBuffer.allocate(data.length);
+            for (Integer x : data) {
+                intBuffer.put(x);
+            }
+            intBuffer.position(0);
+            return intBuffer;
+        }
+        throw new InvalidTypeException("type of the tensor is not Integer");
+    }
+
+    /**
+     * @return byte array representation of the tensor
+     */
+    public byte[] toByteArray() {
+        DataType dataType;
+        if (Boolean.class.equals(this.type)) {
+            dataType = BOOLEAN;
+        } else if (Byte.class.equals(this.type)) {
+            dataType = BYTE;
+        } else if (Short.class.equals(this.type)) {
+            dataType = SHORT;
+        } else if (Integer.class.equals(this.type)) {
+            dataType = INTEGER;
+        } else if (Float.class.equals(this.type)) {
+            dataType = FLOAT;
+        } else if (Long.class.equals(this.type)) {
+            dataType = LONG;
+        } else if (Double.class.equals(this.type)) {
+            dataType = DOUBLE;
+        } else {
+            throw new InvalidTypeException("not implemented for type " + this.type.getName());
+        }
+
+        int totalSize = dataType.getSize() * data.length;
+        int numberOfBytes = totalSize / 8;
+        if (totalSize % 8 > 0) {
+            numberOfBytes++;
+        }
+
+        ByteBuffer byteBuffer = ByteBuffer.allocate(numberOfBytes + 5 + 8 * this.shape.length);
+        byteBuffer.put(dataType.getValue());
+        byteBuffer.putInt(this.shape.length);
+        for (int x : shape) {
+            byteBuffer.putInt(x);
+        }
+        for (int x : strides) {
+            byteBuffer.putInt(x);
+        }
+
+        Iterator<int[]> iterator = indicesIterator();
+
+        if (Boolean.class.equals(this.type)) {
+            int currentBitIndex = 0;
+            int currentByte = 0;
+
+            while (iterator.hasNext()) {
+                Boolean x = (Boolean) getItem(iterator.next());
+                if (x) {
+                    currentByte += (1 << currentBitIndex);
+                }
+                currentBitIndex++;
+
+                if (currentBitIndex == 8) {
+                    byteBuffer.put(Integer.valueOf(currentByte).byteValue());
+                    currentByte = 0;
+                    currentBitIndex = 0;
+                }
+            }
+
+            if (currentBitIndex > 0) {
+                byteBuffer.put(Integer.valueOf(currentByte).byteValue());
+            }
+        } else if (Byte.class.equals(this.type)) {
+            while (iterator.hasNext()) {
+                byteBuffer.put((Byte) getItem(iterator.next()));
+            }
+        } else if (Short.class.equals(this.type)) {
+            while (iterator.hasNext()) {
+                byteBuffer.putShort((Short) getItem(iterator.next()));
+            }
+        } else if (Integer.class.equals(this.type)) {
+            while (iterator.hasNext()) {
+                byteBuffer.putInt((Integer) getItem(iterator.next()));
+            }
+        } else if (Float.class.equals(this.type)) {
+            while (iterator.hasNext()) {
+                byteBuffer.putFloat((Float) getItem(iterator.next()));
+            }
+        } else if (Long.class.equals(this.type)) {
+            while (iterator.hasNext()) {
+                byteBuffer.putLong((Long) getItem(iterator.next()));
+            }
+        } else {
+            while (iterator.hasNext()) {
+                byteBuffer.putDouble((Double) getItem(iterator.next()));
+            }
+        }
+
+        byteBuffer.position(0);
+        return byteBuffer.array();
+    }
+
+    public static JTensor<?> fromByteArray(byte[] byteArray) {
+        ByteBuffer byteBuffer = ByteBuffer.wrap(byteArray);
+
+        DataType dataType = DataType.fromValue(byteBuffer.get());
+        int shapeLength = byteBuffer.getInt();
+        int[] shape = new int[shapeLength];
+        int[] strides = new int[shapeLength];
+
+        int size = 1;
+        for (int i = 0; i < shapeLength; i++) {
+            shape[i] = byteBuffer.getInt();
+            size *= shape[i];
+        }
+
+        for (int i = 0; i < shapeLength; i++) {
+            strides[i] = byteBuffer.getInt();
+        }
+
+        if (BOOLEAN == dataType) {
+            Boolean[] data = new Boolean[size];
+
+            int currentIndex = 0;
+            while (byteBuffer.hasRemaining()) {
+                byte x = byteBuffer.get();
+
+                for (int i = 0; i < 8; i++) {
+                    data[currentIndex] = (x & 1) == 1;
+                    x >>= 1;
+                    currentIndex++;
+                    if (currentIndex == size) {
+                        break;
+                    }
+                }
+            }
+
+            return new JTensor<>(Boolean.class,
+                    shape,
+                    data,
+                    size,
+                    strides,
+                    defaultIndexMapper(),
+                    false);
+        } else if (BYTE == dataType) {
+            Byte[] data = new Byte[size];
+
+            int currentIndex = 0;
+            while (byteBuffer.hasRemaining()) {
+                data[currentIndex] = byteBuffer.get();
+                currentIndex++;
+            }
+
+            return new JTensor<>(Byte.class,
+                    shape,
+                    data,
+                    size,
+                    strides,
+                    defaultIndexMapper(),
+                    false);
+        } else if (SHORT == dataType) {
+            Short[] data = new Short[size];
+
+            int currentIndex = 0;
+            while (byteBuffer.hasRemaining()) {
+                data[currentIndex] = byteBuffer.getShort();
+                currentIndex++;
+            }
+
+            return new JTensor<>(Short.class,
+                    shape,
+                    data,
+                    size,
+                    strides,
+                    defaultIndexMapper(),
+                    false);
+        } else if (INTEGER == dataType) {
+            Integer[] data = new Integer[size];
+
+            int currentIndex = 0;
+            while (byteBuffer.hasRemaining()) {
+                data[currentIndex] = byteBuffer.getInt();
+                currentIndex++;
+            }
+
+            return new JTensor<>(Integer.class,
+                    shape,
+                    data,
+                    size,
+                    strides,
+                    defaultIndexMapper(),
+                    false);
+        } else if (FLOAT == dataType) {
+            Float[] data = new Float[size];
+
+            int currentIndex = 0;
+            while (byteBuffer.hasRemaining()) {
+                data[currentIndex] = byteBuffer.getFloat();
+                currentIndex++;
+            }
+
+            return new JTensor<>(Float.class,
+                    shape,
+                    data,
+                    size,
+                    strides,
+                    defaultIndexMapper(),
+                    false);
+        } else if (LONG == dataType) {
+            Long[] data = new Long[size];
+
+            int currentIndex = 0;
+            while (byteBuffer.hasRemaining()) {
+                data[currentIndex] = byteBuffer.getLong();
+                currentIndex++;
+            }
+
+            return new JTensor<>(Long.class,
+                    shape,
+                    data,
+                    size,
+                    strides,
+                    defaultIndexMapper(),
+                    false);
+        } else if (DOUBLE == dataType) {
+            Double[] data = new Double[size];
+
+            int currentIndex = 0;
+            while (byteBuffer.hasRemaining()) {
+                data[currentIndex] = byteBuffer.getDouble();
+                currentIndex++;
+            }
+
+            return new JTensor<>(Double.class,
+                    shape,
+                    data,
+                    size,
+                    strides,
+                    defaultIndexMapper(),
+                    false);
+        } else {
+            throw new InvalidArgumentException("given byte array is invalid");
+        }
+    }
 
     @Override
     public String toString() {
