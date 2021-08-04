@@ -30,7 +30,15 @@ public class Main {
 
 
     public static void main(String[] args) {
-        Tensor<Integer> tensor = Tensor.ones(Integer.class, new int[]{2, 2, 2});
-        System.out.println(tensor);
+        Integer[][] matrix = new Integer[1000][1000];
+        for (int i = 0; i < 1000; i++) {
+            for (int j = 0; j < 1000; j++) {
+                matrix[i][j] = 255;
+            }
+        }
+        matrix[500][500]= 0;
+
+        JTensor<Integer> t = JTensor.from2DArray(Integer.class, matrix);
+        System.out.println(removeWhiteBorder(t));
     }
 }
