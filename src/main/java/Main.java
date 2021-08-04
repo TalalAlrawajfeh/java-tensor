@@ -2,7 +2,7 @@ import com.tensor.JTensor;
 
 public class Main {
 
-    private static  JTensor<Integer> removeWhiteBorder(JTensor<Integer> tensor) {
+    private static JTensor<Integer> removeWhiteBorder(JTensor<Integer> tensor) {
         var black = JTensor.compare(tensor, JTensor.singleValue(0))
                 .map(Integer.class, x -> x == 0 ? 1 : 0);
 
@@ -30,12 +30,15 @@ public class Main {
 
 
     public static void main(String[] args) {
-        JTensor<Integer> t = JTensor.from2DArray(Integer.class, new Integer[][]{
-                {255, 255, 255},
-                {255, 0, 254},
-                {255, 253, 0},
-                {255, 0, 205},
-                {255, 255, 255}});
+        Integer[][] matrix = new Integer[1000][1000];
+        for (int i = 0; i < 1000; i++) {
+            for (int j = 0; j < 1000; j++) {
+                matrix[i][j] = 255;
+            }
+        }
+        matrix[500][500]= 0;
+
+        JTensor<Integer> t = JTensor.from2DArray(Integer.class, matrix);
 
         System.out.println(removeWhiteBorder(t));
     }

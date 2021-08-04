@@ -56,8 +56,8 @@ public class JTensor<T> {
     private final T[] data;
     private final int size;
     private final int[] strides;
-    // indexMapper maps an array of indices and a dimension to an index of that dimension
-    private final BiFunction<int[], Integer, Integer> indexMapper;
+    // indicesTable is used to map indices when applying certain transformations to a tensor
+    private final int[] indicesTable;
     private final boolean isView;
 
     private JTensor(Class<T> type,
@@ -65,14 +65,14 @@ public class JTensor<T> {
                     T[] data,
                     int size,
                     int[] strides,
-                    BiFunction<int[], Integer, Integer> indexMapper,
+                    int[] indicesTable,
                     boolean isView) {
         this.type = type;
         this.shape = Arrays.copyOf(shape, shape.length);
         this.data = data;
         this.size = size;
         this.strides = Arrays.copyOf(strides, strides.length);
-        this.indexMapper = indexMapper;
+        this.indicesTable = indicesTable;
         this.isView = isView;
     }
 
@@ -90,7 +90,7 @@ public class JTensor<T> {
         size = initializeSize(shape);
         strides = initializeStrides(shape);
         data = (T[]) Array.newInstance(type, size);
-        this.indexMapper = (x, i) -> x[i];
+        this.indicesTable = defaultIndicesTable(size);
         isView = false;
     }
 
@@ -113,7 +113,7 @@ public class JTensor<T> {
         }
         strides = initializeStrides(shape);
         this.data = array;
-        this.indexMapper = (x, i) -> x[i];
+        this.indicesTable = defaultIndicesTable(size);
         isView = false;
     }
 
@@ -131,7 +131,7 @@ public class JTensor<T> {
         size = initializeSize(shape);
         strides = initializeStrides(shape);
         data = (T[]) Array.newInstance(type, size);
-        this.indexMapper = defaultIndexMapper();
+        this.indicesTable = defaultIndicesTable(size);
         isView = false;
         final Iterator<int[]> indicesIterator = indicesIterator();
         while (indicesIterator.hasNext()) {
@@ -162,7 +162,7 @@ public class JTensor<T> {
         this.shape = Arrays.copyOf(tensor.shape, tensor.shape.length);
         this.type = tensor.type;
         this.isView = false;
-        this.indexMapper = tensor.indexMapper;
+        this.indicesTable = Arrays.copyOf(tensor.indicesTable, tensor.indicesTable.length);
         this.size = tensor.size;
     }
 
@@ -450,9 +450,9 @@ public class JTensor<T> {
             if (indices[i] < 0 || indices[i] >= shape[i]) {
                 throw new java.lang.IndexOutOfBoundsException(INDEX_OUT_OF_BOUNDS);
             }
-            index += strides[i] * this.indexMapper.apply(indices, i);
+            index += strides[i] * indices[i];
         }
-        return index;
+        return this.indicesTable[index];
     }
 
     @Override
@@ -527,7 +527,7 @@ public class JTensor<T> {
                 .setData(data)
                 .setSize(newSize)
                 .setStrides(initializeStrides(shape))
-                .setIndexMapper(defaultIndexMapper())
+                .setIndicesTable(defaultIndicesTable(newSize))
                 .setView(isView)
                 .build();
     }
@@ -590,10 +590,44 @@ public class JTensor<T> {
                 .setShape(reverseArray(this.shape))
                 .setSize(size)
                 .setData(data)
-                .setStrides(this.strides)
-                .setIndexMapper((indices, i) -> this.indexMapper.apply(indices, indices.length - i - 1))
+                .setStrides(reverseArray(this.strides))
+                .setIndicesTable(transposedIndicesTable())
                 .setView(true)
                 .build();
+    }
+
+    private int[] transposedIndicesTable() {
+        int[] currentIndices = new int[shape.length];
+        int[] newIndicesTable = new int[size];
+        boolean isFirstTime = true;
+
+        for (int i = 0; i < size; i++) {
+            for (int j = currentIndices.length - 1; j >= 0; j--) {
+                if (!isFirstTime) {
+                    currentIndices[j] += 1;
+                } else {
+                    isFirstTime = false;
+                }
+                if (currentIndices[j] >= shape[j]) {
+                    currentIndices[j] = 0;
+                } else {
+                    int flatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        flatIndex += strides[k] * currentIndices[k];
+                    }
+
+                    int transposedFlatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        transposedFlatIndex += strides[shape.length - k - 1] * currentIndices[shape.length - k - 1];
+                    }
+
+                    newIndicesTable[flatIndex] = this.indicesTable[transposedFlatIndex];
+                    break;
+                }
+            }
+        }
+
+        return newIndicesTable;
     }
 
     private int[] reverseArray(int[] array) {
@@ -615,23 +649,68 @@ public class JTensor<T> {
         shape[dimension1] = shape[dimension2];
         shape[dimension2] = temp;
 
+        int[] strides = Arrays.copyOf(this.strides, this.strides.length);
+        temp = this.strides[dimension1];
+        strides[dimension1] = this.strides[dimension2];
+        strides[dimension2] = temp;
+
         return new TensorBuilder<T>()
                 .setType(type)
                 .setShape(shape)
                 .setSize(size)
                 .setData(data)
-                .setStrides(this.strides)
-                .setIndexMapper((indices, i) -> {
-                    if (i == dimension1) {
-                        return this.indexMapper.apply(indices, dimension2);
-                    } else if (i == dimension2) {
-                        return this.indexMapper.apply(indices, dimension1);
-                    } else {
-                        return this.indexMapper.apply(indices, i);
-                    }
-                })
+                .setStrides(strides)
+                .setIndicesTable(swappedIndicesTable(dimension1, dimension2))
                 .setView(true)
                 .build();
+    }
+
+    private int[] swappedIndicesTable(int dimension1, int dimension2) {
+        int[] currentIndices = new int[shape.length];
+        int[] newIndicesTable = new int[size];
+        boolean isFirstTime = true;
+
+        for (int i = 0; i < size; i++) {
+            for (int j = currentIndices.length - 1; j >= 0; j--) {
+                if (!isFirstTime) {
+                    currentIndices[j] += 1;
+                } else {
+                    isFirstTime = false;
+                }
+                if (currentIndices[j] >= shape[j]) {
+                    currentIndices[j] = 0;
+                } else {
+                    int flatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        flatIndex += strides[k] * currentIndices[k];
+                    }
+
+                    int swappedFlatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        int swappedDimensionIndex;
+                        int stride;
+
+                        if (k == dimension1) {
+                            swappedDimensionIndex = currentIndices[dimension2];
+                            stride = strides[dimension2];
+                        } else if (k == dimension2) {
+                            swappedDimensionIndex = currentIndices[dimension1];
+                            stride = strides[dimension1];
+                        } else {
+                            swappedDimensionIndex = currentIndices[k];
+                            stride = strides[k];
+                        }
+
+                        swappedFlatIndex += stride * swappedDimensionIndex;
+                    }
+
+                    newIndicesTable[flatIndex] = this.indicesTable[swappedFlatIndex];
+                    break;
+                }
+            }
+        }
+
+        return newIndicesTable;
     }
 
     /**
@@ -662,15 +741,52 @@ public class JTensor<T> {
             offsets[i] = leftInclusiveLimit;
         }
 
+        int size = initializeSize(shape);
+        int[] strides = initializeStrides(shape);
+
         return new TensorBuilder<T>()
                 .setType(this.type)
                 .setShape(shape)
                 .setData(this.data)
-                .setSize(initializeSize(shape))
-                .setStrides(this.strides)
-                .setIndexMapper((indices, i) -> this.indexMapper.apply(indices, i) + offsets[i])
+                .setSize(size)
+                .setStrides(strides)
+                .setIndicesTable(slicedIndicesTable(shape, strides, offsets, size))
                 .setView(true)
                 .build();
+    }
+
+    private int[] slicedIndicesTable(int[] shape, int[] strides, int[] offsets, int size) {
+        int[] currentIndices = new int[shape.length];
+        int[] newIndicesTable = new int[size];
+        boolean isFirstTime = true;
+
+        for (int i = 0; i < size; i++) {
+            for (int j = currentIndices.length - 1; j >= 0; j--) {
+                if (!isFirstTime) {
+                    currentIndices[j] += 1;
+                } else {
+                    isFirstTime = false;
+                }
+                if (currentIndices[j] >= shape[j]) {
+                    currentIndices[j] = 0;
+                } else {
+                    int flatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        flatIndex += this.strides[k] * (currentIndices[k] + offsets[k]);
+                    }
+
+                    int slicedFlatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        slicedFlatIndex += strides[k] * currentIndices[k];
+                    }
+
+                    newIndicesTable[slicedFlatIndex] = this.indicesTable[flatIndex];
+                    break;
+                }
+            }
+        }
+
+        return newIndicesTable;
     }
 
     /**
@@ -1214,21 +1330,53 @@ public class JTensor<T> {
      * @return a tensor with indices reversed along a given dimension.
      */
     public JTensor<T> reverse(int dimension) {
-        BiFunction<int[], Integer, Integer> reversedIndexMapper = (indices, d) -> {
-            var i = this.indexMapper.apply(indices, d);
-            if (d == dimension) {
-                return this.shape[d] - i - 1;
-            }
-            return i;
-        };
-
         return new JTensor<T>(this.type,
                 this.shape,
                 this.data,
                 this.size,
                 this.strides,
-                reversedIndexMapper,
+                reversedIndicesTable(dimension),
                 true);
+    }
+
+    private int[] reversedIndicesTable(int dimension) {
+        int[] currentIndices = new int[shape.length];
+        int[] newIndicesTable = new int[size];
+        boolean isFirstTime = true;
+
+        for (int i = 0; i < size; i++) {
+            for (int j = currentIndices.length - 1; j >= 0; j--) {
+                if (!isFirstTime) {
+                    currentIndices[j] += 1;
+                } else {
+                    isFirstTime = false;
+                }
+                if (currentIndices[j] >= shape[j]) {
+                    currentIndices[j] = 0;
+                } else {
+                    int flatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        flatIndex += strides[k] * currentIndices[k];
+                    }
+
+                    int reversedFlatIndex = 0;
+                    for (int k = 0; k < currentIndices.length; k++) {
+                        int reversedDimensionIndex;
+                        if (k == dimension) {
+                            reversedDimensionIndex = this.shape[k] - currentIndices[k] - 1;
+                        } else {
+                            reversedDimensionIndex = currentIndices[k];
+                        }
+                        reversedFlatIndex += strides[k] * reversedDimensionIndex;
+                    }
+
+                    newIndicesTable[flatIndex] = this.indicesTable[reversedFlatIndex];
+                    break;
+                }
+            }
+        }
+
+        return newIndicesTable;
     }
 
     private int[] getTensorShapeForReducing(int dimension, int[] shape, int[] strides) {
@@ -1830,7 +1978,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    defaultIndexMapper(),
+                    defaultIndicesTable(size),
                     false);
         } else if (BYTE == dataType) {
             Byte[] data = new Byte[size];
@@ -1846,7 +1994,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    defaultIndexMapper(),
+                    defaultIndicesTable(size),
                     false);
         } else if (SHORT == dataType) {
             Short[] data = new Short[size];
@@ -1862,7 +2010,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    defaultIndexMapper(),
+                    defaultIndicesTable(size),
                     false);
         } else if (INTEGER == dataType) {
             Integer[] data = new Integer[size];
@@ -1878,7 +2026,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    defaultIndexMapper(),
+                    defaultIndicesTable(size),
                     false);
         } else if (FLOAT == dataType) {
             Float[] data = new Float[size];
@@ -1894,7 +2042,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    defaultIndexMapper(),
+                    defaultIndicesTable(size),
                     false);
         } else if (LONG == dataType) {
             Long[] data = new Long[size];
@@ -1910,7 +2058,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    defaultIndexMapper(),
+                    defaultIndicesTable(size),
                     false);
         } else if (DOUBLE == dataType) {
             Double[] data = new Double[size];
@@ -1926,7 +2074,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    defaultIndexMapper(),
+                    defaultIndicesTable(size),
                     false);
         } else {
             throw new InvalidArgumentException("given byte array is invalid");
@@ -2005,8 +2153,12 @@ public class JTensor<T> {
         return representation.toString().trim();
     }
 
-    private static BiFunction<int[], Integer, Integer> defaultIndexMapper() {
-        return (x, i) -> x[i];
+    private static int[] defaultIndicesTable(int size) {
+        int[] indices = new int[size];
+        for (int i = 0; i < size; i++) {
+            indices[i] = i;
+        }
+        return indices;
     }
 
     private static class TensorBuilder<T> {
@@ -2015,7 +2167,7 @@ public class JTensor<T> {
         private T[] data;
         private int size;
         private int[] strides;
-        private BiFunction<int[], Integer, Integer> indexMapper;
+        private int[] indicesTable;
         private boolean isView;
 
         public TensorBuilder<T> setType(Class<T> type) {
@@ -2043,8 +2195,8 @@ public class JTensor<T> {
             return this;
         }
 
-        public TensorBuilder<T> setIndexMapper(BiFunction<int[], Integer, Integer> indexMapper) {
-            this.indexMapper = indexMapper;
+        public TensorBuilder<T> setIndicesTable(int[] indicesTable) {
+            this.indicesTable = indicesTable;
             return this;
         }
 
@@ -2060,7 +2212,7 @@ public class JTensor<T> {
                     data,
                     size,
                     strides,
-                    indexMapper,
+                    indicesTable,
                     isView);
         }
     }
