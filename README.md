@@ -8,7 +8,7 @@ A Tensor is a multi-dimensional array with arrays of equal lengths (dimension si
 #### Example 1
 code:
 ```java
-Tensor<Integer> tensor = Tensor.ones(Integer.class, new int[]{2, 2, 2});
+JTensor<Integer> tensor = JTensor.ones(Integer.class, new int[]{2, 2, 2});
 System.out.println(tensor);
 ```
 
@@ -24,7 +24,7 @@ result:
 #### Example 2
 code:
 ```java
-Tensor<Double> tensor = new Tensor<>(
+JTensor<Double> tensor = new JTensor<>(
         Double.class,
         new int[]{2, 3},
         new Double[]{
@@ -43,7 +43,7 @@ result:
 #### Example 3
 code:
 ```java
-Tensor<Double> tensor = new Tensor<>(
+JTensor<Double> tensor = new JTensor<>(
         Double.class,
         new int[]{2, 3},
         new Double[]{
@@ -62,13 +62,13 @@ result:
 #### Example 4
 code:
 ```java
-Tensor<Double> tensor = new Tensor<>(
+JTensor<Double> tensor = new JTensor<>(
         Double.class,
         new int[]{2, 3},
         new Double[]{
                 5.0, 6.0, 1.0,
                 -1.0, 0.0, 2.0});
-Tensor<Boolean> mask = Tensor.greaterThan(tensor, Tensor.singleValue(0.0));
+JTensor<Boolean> mask = JTensor.greaterThan(tensor, JTensor.singleValue(0.0));
 System.out.println(tensor.applyMask(mask));
 ```
 
@@ -80,7 +80,7 @@ result:
 #### Example 5
 code:
 ```java
-Tensor<Double> tensor = new Tensor<>(
+JTensor<Double> tensor = new JTensor<>(
         Double.class,
         new int[]{2, 3},
         new Double[]{
@@ -98,19 +98,19 @@ result:
 #### Example 6
 code:
 ```java
-Tensor<Double> tensor1 = new Tensor<>(
+JTensor<Double> tensor1 = new JTensor<>(
         Double.class,
         new int[]{3, 1},
         new Double[]{
                 1.0, 2.0, 3.0});
 
-Tensor<Double> tensor2 = new Tensor<>(
+JTensor<Double> tensor2 = new JTensor<>(
         Double.class,
         new int[]{1, 3},
         new Double[]{
                 4.0, 5.0, 6.0});
 
-System.out.println(Tensor.multiply(tensor1, tensor2));
+System.out.println(JTensor.multiply(tensor1, tensor2));
 ```
 
 ```
@@ -122,12 +122,12 @@ System.out.println(Tensor.multiply(tensor1, tensor2));
 #### Example 7
 code:
 ```java
-Tensor<Double> tensor = new Tensor<>(
+JTensor<Double> tensor = new JTensor<>(
         Double.class,
         new int[]{2, 2, 2},
         new Double[]{-1.0, 5.0, 2.0, 4.0, -6.0, 9.0, 1.5, 7.2});
 
-System.out.println(Tensor.max(tensor, 1, false));
+System.out.println(JTensor.max(tensor, 1, false));
 ```
 
 result:
