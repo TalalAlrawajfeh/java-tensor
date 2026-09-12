@@ -1,6 +1,9 @@
 package com.tensor;
 
-public class IndexOutOfBoundsException extends RuntimeException {
+@SuppressWarnings("this-escape") // initCause is required because the superclass has no cause constructor.
+public class IndexOutOfBoundsException extends java.lang.IndexOutOfBoundsException {
+    private static final long serialVersionUID = 1L;
+
     public IndexOutOfBoundsException() {
     }
 
@@ -9,14 +12,17 @@ public class IndexOutOfBoundsException extends RuntimeException {
     }
 
     public IndexOutOfBoundsException(String message, Throwable cause) {
-        super(message, cause);
+        super(message);
+        initCause(cause);
     }
 
     public IndexOutOfBoundsException(Throwable cause) {
-        super(cause);
+        super(cause == null ? null : cause.toString());
+        initCause(cause);
     }
 
     public IndexOutOfBoundsException(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
-        super(message, cause, enableSuppression, writableStackTrace);
+        super(message);
+        initCause(cause);
     }
 }

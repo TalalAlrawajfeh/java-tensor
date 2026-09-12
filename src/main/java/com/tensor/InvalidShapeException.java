@@ -1,6 +1,8 @@
 package com.tensor;
 
 public class InvalidShapeException extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
     public InvalidShapeException() {
     }
 

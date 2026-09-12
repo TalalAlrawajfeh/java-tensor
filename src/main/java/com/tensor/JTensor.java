@@ -85,9 +85,10 @@ public class JTensor<T> {
      */
     public JTensor(Class<T> type,
                    int[] shape) {
+        validateTensorType(type);
+        size = initializeSize(shape);
         this.shape = Arrays.copyOf(shape, shape.length);
         this.type = type;
-        size = initializeSize(shape);
         strides = initializeStrides(shape);
         data = (T[]) Array.newInstance(type, size);
         this.indicesTable = defaultIndicesTable(size);
@@ -96,6 +97,7 @@ public class JTensor<T> {
 
     /**
      * Constructs a tensor with the given shape from a 1-dimensional array in row-major order.
+     * The array values are copied into storage whose runtime component type matches {@code type}.
      *
      * @param type  determines the type of the values of the tensor.
      * @param shape determines the shapes of the dimensions of the tensor where each shape should be a (strictly) positive integer.
@@ -105,14 +107,22 @@ public class JTensor<T> {
     public JTensor(Class<T> type,
                    int[] shape,
                    T[] array) {
+        validateTensorType(type);
+        if (array == null) {
+            throw new InvalidArgumentException("data array must not be null");
+        }
+        size = initializeSize(shape);
         this.shape = Arrays.copyOf(shape, shape.length);
         this.type = type;
-        size = initializeSize(shape);
         if (array.length != size) {
             throw new DataSizeMismatchException("given array size: " + array.length + ", but should be " + size);
         }
+        for (T value : array) {
+            validateValueType(type, value);
+        }
         strides = initializeStrides(shape);
-        this.data = array;
+        this.data = (T[]) Array.newInstance(type, size);
+        System.arraycopy(array, 0, this.data, 0, size);
         this.indicesTable = defaultIndicesTable(size);
         isView = false;
     }
@@ -126,17 +136,24 @@ public class JTensor<T> {
      * @throws DataSizeMismatchException when the length of the given array does not equal the calculated size of the tensor.
      */
     public JTensor(Class<T> type, int[] shape, Function<int[], T> initializer) {
+        validateTensorType(type);
+        if (initializer == null) {
+            throw new InvalidArgumentException("initializer must not be null");
+        }
+        size = initializeSize(shape);
         this.shape = Arrays.copyOf(shape, shape.length);
         this.type = type;
-        size = initializeSize(shape);
         strides = initializeStrides(shape);
         data = (T[]) Array.newInstance(type, size);
         this.indicesTable = defaultIndicesTable(size);
         isView = false;
-        final Iterator<int[]> indicesIterator = indicesIterator();
+        final Iterator<int[]> indicesIterator = createIndicesIterator(this.shape);
         while (indicesIterator.hasNext()) {
             final int[] indices = indicesIterator.next();
-            data[dataIndex(indices)] = initializer.apply(indices);
+            final int destinationIndex = dataIndex(indices);
+            T value = initializer.apply(indices);
+            validateValueType(type, value);
+            data[destinationIndex] = value;
         }
     }
 
@@ -147,6 +164,9 @@ public class JTensor<T> {
      * @param tensor the tensor to be copied.
      */
     public JTensor(JTensor<T> tensor) {
+        if (tensor == null) {
+            throw new InvalidArgumentException("tensor must not be null");
+        }
         if (tensor.isView()) {
             this.data = (T[]) Array.newInstance(tensor.type, tensor.size);
             final Iterator<int[]> indicesIterator = tensor.indicesIterator();
@@ -158,11 +178,11 @@ public class JTensor<T> {
         } else {
             this.data = Arrays.copyOf(tensor.data, tensor.getSize());
         }
-        this.strides = Arrays.copyOf(tensor.strides, tensor.strides.length);
         this.shape = Arrays.copyOf(tensor.shape, tensor.shape.length);
+        this.strides = initializeStrides(this.shape);
         this.type = tensor.type;
         this.isView = false;
-        this.indicesTable = Arrays.copyOf(tensor.indicesTable, tensor.indicesTable.length);
+        this.indicesTable = defaultIndicesTable(tensor.size);
         this.size = tensor.size;
     }
 
@@ -178,9 +198,25 @@ public class JTensor<T> {
      * @param shape determines the shapes of the dimensions of the tensor where each shape should be a (strictly) positive integer.
      * @param value the value to be repeated
      * @return a tensor of the given shape and its data consists of the repeated value.
+     * The runtime class of {@code value} becomes the tensor type; use the overload
+     * accepting {@link Class} when a wider declared type or a null value is required.
      */
     public static <T> JTensor<T> repeat(int[] shape, T value) {
-        return new JTensor<T>((Class<T>) value.getClass(), shape, a -> value);
+        if (value == null) {
+            throw new InvalidArgumentException(
+                    "repeated value must not be null when no explicit type is provided");
+        }
+        return repeat((Class<T>) value.getClass(), shape, value);
+    }
+
+    /**
+     * Returns a tensor filled with a repeated value using an explicit component type.
+     * This overload can represent null values and avoids generic type inference from
+     * the runtime class of {@code value}.
+     */
+    public static <T> JTensor<T> repeat(Class<T> type, int[] shape, T value) {
+        validateValueType(type, value);
+        return new JTensor<>(type, shape, a -> value);
     }
 
     /**
@@ -189,6 +225,10 @@ public class JTensor<T> {
      */
     public static <T> JTensor<T> singleValue(T value) {
         return repeat(new int[]{1}, value);
+    }
+
+    public static <T> JTensor<T> singleValue(Class<T> type, T value) {
+        return repeat(type, new int[]{1}, value);
     }
 
     /**
@@ -215,7 +255,7 @@ public class JTensor<T> {
      * @return an identity matrix.
      */
     public static <T extends Number> JTensor<T> identity(Class<T> type, int dimensionShape) {
-        JTensor<T> identity = new JTensor<>(type, new int[]{dimensionShape, dimensionShape});
+        JTensor<T> identity = zeros(type, new int[]{dimensionShape, dimensionShape});
         for (int i = 0; i < dimensionShape; i++) {
             identity.setItem(new int[]{i, i}, NumberHelper.one(type));
         }
@@ -226,8 +266,15 @@ public class JTensor<T> {
      * @param type  determines the type of the values of the tensor
      * @param array a one-dimensional array to construct the tensor from
      * @return a tensor with the same shape and data as the one-dimensional array
+     * The values are copied; an empty input produces the rank-zero empty tensor.
      */
     public static <T> JTensor<T> from1DArray(Class<T> type, T[] array) {
+        if (array == null) {
+            throw new InvalidArgumentException("array must not be null");
+        }
+        if (array.length == 0) {
+            return empty(type);
+        }
         return new JTensor<>(type, new int[]{array.length}, array);
     }
 
@@ -238,11 +285,14 @@ public class JTensor<T> {
      * @throws InvalidArgumentException if the arrays in a dimension are not of the same length
      */
     public static <T> JTensor<T> from2DArray(Class<T> type, T[][] array) {
+        if (array == null || array.length == 0 || array[0] == null || array[0].length == 0) {
+            throw new InvalidArgumentException("array dimensions must be non-empty");
+        }
         int secondDimension = array[0].length;
         final JTensor<T> result = new JTensor<>(type, new int[]{array.length, secondDimension});
 
         for (int i = 0; i < array.length; i++) {
-            if (array[i].length != secondDimension) {
+            if (array[i] == null || array[i].length != secondDimension) {
                 throw new InvalidArgumentException(ARRAYS_DO_NOT_ALL_HAVE_THE_SAME_LENGTH);
             }
             for (int j = 0; j < secondDimension; j++) {
@@ -259,6 +309,11 @@ public class JTensor<T> {
      * @throws InvalidArgumentException if the arrays in a dimension are not of the same length
      */
     public static <T> JTensor<T> from3DArray(Class<T> type, T[][][] array) {
+        if (array == null || array.length == 0
+                || array[0] == null || array[0].length == 0
+                || array[0][0] == null || array[0][0].length == 0) {
+            throw new InvalidArgumentException("array dimensions must be non-empty");
+        }
         int secondDimension = array[0].length;
         int thirdDimension = array[0][0].length;
         final JTensor<T> result = new JTensor<>(type, new int[]{
@@ -267,11 +322,11 @@ public class JTensor<T> {
                 thirdDimension});
 
         for (int i = 0; i < array.length; i++) {
-            if (array[i].length != secondDimension) {
+            if (array[i] == null || array[i].length != secondDimension) {
                 throw new InvalidArgumentException(ARRAYS_DO_NOT_ALL_HAVE_THE_SAME_LENGTH);
             }
             for (int j = 0; j < secondDimension; j++) {
-                if (array[i][j].length != thirdDimension) {
+                if (array[i][j] == null || array[i][j].length != thirdDimension) {
                     throw new InvalidArgumentException(ARRAYS_DO_NOT_ALL_HAVE_THE_SAME_LENGTH);
                 }
                 for (int k = 0; k < thirdDimension; k++) {
@@ -289,6 +344,12 @@ public class JTensor<T> {
      * @throws InvalidArgumentException if the arrays in a dimension are not of the same length
      */
     public static <T> JTensor<T> from4DArray(Class<T> type, T[][][][] array) {
+        if (array == null || array.length == 0
+                || array[0] == null || array[0].length == 0
+                || array[0][0] == null || array[0][0].length == 0
+                || array[0][0][0] == null || array[0][0][0].length == 0) {
+            throw new InvalidArgumentException("array dimensions must be non-empty");
+        }
         int secondDimension = array[0].length;
         int thirdDimension = array[0][0].length;
         int fourthDimension = array[0][0][0].length;
@@ -299,15 +360,15 @@ public class JTensor<T> {
                 fourthDimension});
 
         for (int i = 0; i < array.length; i++) {
-            if (array[i].length != secondDimension) {
+            if (array[i] == null || array[i].length != secondDimension) {
                 throw new InvalidArgumentException(ARRAYS_DO_NOT_ALL_HAVE_THE_SAME_LENGTH);
             }
             for (int j = 0; j < secondDimension; j++) {
-                if (array[i][j].length != thirdDimension) {
+                if (array[i][j] == null || array[i][j].length != thirdDimension) {
                     throw new InvalidArgumentException(ARRAYS_DO_NOT_ALL_HAVE_THE_SAME_LENGTH);
                 }
                 for (int k = 0; k < thirdDimension; k++) {
-                    if (array[i][j][k].length != fourthDimension) {
+                    if (array[i][j][k] == null || array[i][j][k].length != fourthDimension) {
                         throw new InvalidArgumentException(ARRAYS_DO_NOT_ALL_HAVE_THE_SAME_LENGTH);
                     }
                     for (int l = 0; l < fourthDimension; l++) {
@@ -319,19 +380,26 @@ public class JTensor<T> {
         return result;
     }
 
-    private int[] initializeStrides(int[] shape) {
+    private static int[] initializeStrides(int[] shape) {
         final int[] strides = new int[shape.length];
 
         int currentStride = 1;
         for (int i = shape.length - 1; i >= 0; i--) {
             strides[i] = currentStride;
-            currentStride *= shape[i];
+            try {
+                currentStride = Math.multiplyExact(currentStride, shape[i]);
+            } catch (ArithmeticException exception) {
+                throw new InvalidShapeException("tensor shape is too large", exception);
+            }
         }
 
         return strides;
     }
 
-    private int initializeSize(int[] shape) {
+    private static int initializeSize(int[] shape) {
+        if (shape == null) {
+            throw new InvalidShapeException("shape must not be null");
+        }
         if (shape.length == 0) {
             return 0;
         }
@@ -342,20 +410,28 @@ public class JTensor<T> {
             if (dimension <= 0) {
                 throw new InvalidShapeException("given non-positive number as a dimension: " + dimension);
             }
-            size *= dimension;
+            try {
+                size = Math.multiplyExact(size, dimension);
+            } catch (ArithmeticException exception) {
+                throw new InvalidShapeException("tensor shape is too large", exception);
+            }
         }
 
         return size;
     }
 
     /**
-     * @return an iterator of all the possible indices of the tensor ordered lexicographically increasing
-     * which is in the same order of the data array.
+     * @return an iterator of all possible logical indices in row-major order.
+     * For views, this order may differ from the backing data array order.
      * @throws NoNextElementException if next is called and no next item is present.
      */
     public Iterator<int[]> indicesIterator() {
+        return createIndicesIterator(shape);
+    }
+
+    private static Iterator<int[]> createIndicesIterator(int[] iteratorShape) {
         return new Iterator<>() {
-            private final int[] currentIndices = new int[shape.length];
+            private final int[] currentIndices = new int[iteratorShape.length];
             private boolean isFirstTime = true;
             private boolean isDone = false;
 
@@ -365,7 +441,8 @@ public class JTensor<T> {
                     return false;
                 }
                 for (int i = currentIndices.length - 1; i >= 0; i--) {
-                    if (currentIndices[i] < shape[i] - 1 || (isFirstTime && currentIndices[i] == shape[i] - 1)) {
+                    if (currentIndices[i] < iteratorShape[i] - 1
+                            || (isFirstTime && currentIndices[i] == iteratorShape[i] - 1)) {
                         return true;
                     }
                 }
@@ -375,7 +452,7 @@ public class JTensor<T> {
 
             @Override
             public int[] next() {
-                if (isDone) {
+                if (!hasNext()) {
                     throw new NoNextElementException(NO_NEXT_ELEMENT);
                 }
                 if (isFirstTime) {
@@ -384,7 +461,7 @@ public class JTensor<T> {
                 }
                 for (int i = currentIndices.length - 1; i >= 0; i--) {
                     currentIndices[i] += 1;
-                    if (currentIndices[i] >= shape[i]) {
+                    if (currentIndices[i] >= iteratorShape[i]) {
                         currentIndices[i] = 0;
                     } else {
                         return Arrays.copyOf(currentIndices, currentIndices.length);
@@ -401,30 +478,27 @@ public class JTensor<T> {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         JTensor<?> tensor = (JTensor<?>) o;
-        boolean areEqual = Objects.equals(type, tensor.type) &&
-                Arrays.equals(shape, tensor.shape);
+        if (!Objects.equals(type, tensor.type) || !Arrays.equals(shape, tensor.shape)) {
+            return false;
+        }
 
         Iterator<int[]> iterator1 = indicesIterator();
         Iterator<int[]> iterator2 = tensor.indicesIterator();
 
-        while (iterator1.hasNext() & iterator2.hasNext()) {
-            if (!getItem(iterator1.next()).equals(tensor.getItem(iterator2.next()))) {
-                areEqual = false;
-                break;
+        while (iterator1.hasNext()) {
+            if (!Objects.equals(getItem(iterator1.next()), tensor.getItem(iterator2.next()))) {
+                return false;
             }
         }
 
-        if (iterator1.hasNext() || iterator2.hasNext()) {
-            areEqual = false;
-        }
-
-        return areEqual;
+        return true;
     }
 
     /**
      * @param indices an array containing an index for each dimension of the tensor.
      * @return the item stored in the tensor at the given indices.
-     * @throws java.lang.IndexOutOfBoundsException if on of the indices is not within the bound of the shape of the dimension.
+     * @throws InvalidArgumentException if the number of indices does not match the tensor rank.
+     * @throws IndexOutOfBoundsException if one of the indices is not within the bound of its dimension.
      */
     public T getItem(int[] indices) {
         return this.data[dataIndex(indices)];
@@ -433,26 +507,74 @@ public class JTensor<T> {
     /**
      * @param indices an array containing an index for each dimension of the tensor.
      * @param number  the item to store in the tensor at the given indices.
+     * @throws InvalidArgumentException if the number of indices does not match the tensor rank.
      */
     public void setItem(int[] indices, T number) {
+        validateValueType(type, number);
         this.data[dataIndex(indices)] = number;
     }
 
+    private static void validateValueType(Class<?> type, Object value) {
+        validateTensorType(type);
+        if (value != null && !type.isInstance(value)) {
+            throw new InvalidTypeException("value type " + value.getClass().getName()
+                    + " is not compatible with tensor type " + type.getName());
+        }
+    }
+
+    private static void validateTensorType(Class<?> type) {
+        if (type == null) {
+            throw new InvalidArgumentException("type must not be null");
+        }
+        if (type.isPrimitive()) {
+            throw new InvalidTypeException(
+                    "primitive class tokens are not supported; use the corresponding wrapper class");
+        }
+    }
+
+    private static <V> JTensor<V> requireTensor(JTensor<V> tensor) {
+        if (tensor == null) {
+            throw new InvalidArgumentException("tensor must not be null");
+        }
+        return tensor;
+    }
+
+    private void requireNonNullItems(String operation) {
+        Iterator<int[]> iterator = indicesIterator();
+        while (iterator.hasNext()) {
+            if (getItem(iterator.next()) == null) {
+                throw new InvalidArgumentException(
+                        operation + " does not support null tensor values");
+            }
+        }
+    }
+
     private int dataIndex(int[] indices) {
-        if (indices.length == 0) {
-            throw new InvalidArgumentException("invalid indices, the indices array is empty");
+        if (indices == null) {
+            throw new InvalidArgumentException("indices must not be null");
+        }
+        if (indices.length != this.shape.length) {
+            throw new InvalidArgumentException("invalid number of indices: expected "
+                    + this.shape.length + " but got " + indices.length);
         }
         if (this.shape.length == 0) {
-            throw new java.lang.IndexOutOfBoundsException(INDEX_OUT_OF_BOUNDS);
+            throw new IndexOutOfBoundsException(INDEX_OUT_OF_BOUNDS);
         }
         int index = 0;
         for (int i = 0; i < indices.length; i++) {
             if (indices[i] < 0 || indices[i] >= shape[i]) {
-                throw new java.lang.IndexOutOfBoundsException(INDEX_OUT_OF_BOUNDS);
+                throw new IndexOutOfBoundsException(INDEX_OUT_OF_BOUNDS);
             }
             index += strides[i] * indices[i];
         }
         return this.indicesTable[index];
+    }
+
+    private void validateDimension(int dimension) {
+        if (dimension < 0 || dimension >= shape.length) {
+            throw new InvalidArgumentException("invalid dimension " + dimension
+                    + " for tensor rank " + shape.length);
+        }
     }
 
     @Override
@@ -460,7 +582,7 @@ public class JTensor<T> {
         int result = Arrays.hashCode(shape);
         final Iterator<int[]> indicesIterator = this.indicesIterator();
         while (indicesIterator.hasNext()) {
-            result = 31 * result + getItem(indicesIterator.next()).hashCode();
+            result = 31 * result + Objects.hashCode(getItem(indicesIterator.next()));
         }
         return result;
     }
@@ -470,9 +592,13 @@ public class JTensor<T> {
     }
 
     public int[] getShape() {
-        return shape;
+        return Arrays.copyOf(shape, shape.length);
     }
 
+    /**
+     * Returns the backing data array. For a view, this is the shared backing array
+     * and is not necessarily in the view's logical element order.
+     */
     public T[] getData() {
         return data;
     }
@@ -482,7 +608,7 @@ public class JTensor<T> {
     }
 
     public int[] getStrides() {
-        return strides;
+        return Arrays.copyOf(strides, strides.length);
     }
 
     public boolean isView() {
@@ -493,10 +619,8 @@ public class JTensor<T> {
      * @param shape an array of dimensions of the new tensor.
      * @return a new tensor with the same data but with the given shape.
      * Does a shallow copy of the tensor and the new tensor becomes a view
-     * of the old tensor except when the tensor is already a view and the
-     * size of the data is not equivalent to the size of the tensor which,
-     * in this case, copies the exact required data into a new array and
-     * sets isView to false.
+     * of the old tensor except when the tensor is already a view. Existing
+     * views are materialized in logical row-major order before reshaping.
      * @throws InvalidArgumentException if the size of the given shape is not equal to the size of the tensor.
      */
     public JTensor<T> reshape(int[] shape) {
@@ -508,7 +632,7 @@ public class JTensor<T> {
         T[] data = this.data;
         boolean isView = true;
 
-        if (this.isView && this.size != this.data.length) {
+        if (this.isView) {
             data = (T[]) Array.newInstance(this.type, this.size);
 
             final Iterator<int[]> indicesIterator = indicesIterator();
@@ -537,6 +661,9 @@ public class JTensor<T> {
      * May return a view of the tensor according to the rules of reshape.
      */
     public JTensor<T> ravel() {
+        if (size == 0) {
+            return reshape(new int[]{});
+        }
         return this.reshape(new int[]{this.size});
     }
 
@@ -544,6 +671,9 @@ public class JTensor<T> {
      * @return same as ravel() but always returns a deep copy of the tensor.
      */
     public JTensor<T> flatten() {
+        if (size == 0) {
+            return new JTensor<>(this);
+        }
         T[] data = (T[]) Array.newInstance(this.type, this.size);
 
         final Iterator<int[]> indicesIterator = indicesIterator();
@@ -564,8 +694,13 @@ public class JTensor<T> {
      * @throws InvalidArgumentException if the given dimension is not of shape 1.
      */
     public JTensor<T> squeeze(int dimension) {
+        validateDimension(dimension);
         if (shape[dimension] != 1) {
             throw new InvalidArgumentException("can only squeeze a dimension when its shape is 1");
+        }
+        if (shape.length == 1) {
+            throw new InvalidArgumentException(
+                    "cannot squeeze the only dimension because scalar tensors are not supported");
         }
 
         int[] squeezedShape = new int[shape.length - 1];
@@ -644,6 +779,8 @@ public class JTensor<T> {
      * @return the tensor with two dimensions swapped. The result tensor is a view of the original.
      */
     public JTensor<T> swapDimensions(int dimension1, int dimension2) {
+        validateDimension(dimension1);
+        validateDimension(dimension2);
         int[] shape = Arrays.copyOf(this.shape, this.shape.length);
         int temp = shape[dimension1];
         shape[dimension1] = shape[dimension2];
@@ -721,13 +858,24 @@ public class JTensor<T> {
      * The result tensor is a view of the original tensor.
      * @throws InvalidArgumentException if one of the intervals is invalid, i.e. one of the intervals contains a
      *                                  negative index, the starting index is greater or equal the ending index, or one of the indices exceed the shape
-     *                                  of the dimension.
+     *                                  of the dimension, or the number of intervals does not match the tensor rank.
      */
     public JTensor<T> slice(int[][] intervals) {
+        if (intervals == null) {
+            throw new InvalidArgumentException("intervals must not be null");
+        }
+        if (intervals.length != this.shape.length) {
+            throw new InvalidArgumentException("invalid number of intervals: expected "
+                    + this.shape.length + " but got " + intervals.length);
+        }
+
         int[] shape = new int[this.shape.length];
         int[] offsets = new int[this.shape.length];
 
         for (int i = 0; i < this.shape.length; i++) {
+            if (intervals[i] == null || intervals[i].length != 2) {
+                throw new InvalidArgumentException("each interval must contain exactly two indices");
+            }
             final int rightExclusiveLimit = intervals[i][1];
             final int leftInclusiveLimit = intervals[i][0];
 
@@ -800,14 +948,22 @@ public class JTensor<T> {
      *                                  concatenation dimension.
      */
     public static <A> JTensor<A> concatenate(JTensor<A> tensor1, JTensor<A> tensor2, int dimension) {
+        if (tensor1 == null || tensor2 == null) {
+            throw new InvalidArgumentException("tensors to concatenate must not be null");
+        }
         if (tensor1.shape.length != tensor2.shape.length) {
             throw new InvalidArgumentException("tensors must have the same number of dimensions");
         }
+        tensor1.validateDimension(dimension);
 
         int[] newShape = new int[tensor1.shape.length];
         for (int i = 0; i < tensor1.shape.length; i++) {
             if (i == dimension) {
-                newShape[i] = tensor1.shape[i] + tensor2.shape[i];
+                try {
+                    newShape[i] = Math.addExact(tensor1.shape[i], tensor2.shape[i]);
+                } catch (ArithmeticException exception) {
+                    throw new InvalidShapeException("concatenated tensor shape is too large", exception);
+                }
                 continue;
             }
             if (tensor1.shape[i] != tensor2.shape[i]) {
@@ -849,12 +1005,20 @@ public class JTensor<T> {
      * @param mask a boolean tensor acting as a mask to extract the specific items/arrays from the tensor
      * @return a tensor that is the result of applying the mask to the tensor. The shapes of the first n
      * dimensions of the tensor must be equal to the shapes of the mask dimensions where n is the number of dimensions
-     * the mask.
+     * the mask. If the mask selects no values, the result is the rank-zero empty tensor.
      * @throws InvalidArgumentException if the corresponding dimensions of the mask and the tensor are not equal.
      */
     public JTensor<T> applyMask(JTensor<Boolean> mask) {
+        if (mask == null) {
+            throw new InvalidArgumentException("mask must not be null");
+        }
+        mask.requireNonNullItems("Mask application");
         int[] maskShape = mask.getShape();
         int[] tensorShape = getShape();
+
+        if (maskShape.length > tensorShape.length) {
+            throw new InvalidArgumentException("mask rank must not exceed tensor rank");
+        }
 
         for (int i = 0; i < maskShape.length; i++) {
             if (maskShape[i] != tensorShape[i]) {
@@ -909,10 +1073,16 @@ public class JTensor<T> {
     /**
      * @param shape the shape to resize the tensor to which could be equal to or smaller than the original tensor's shape
      * @return takes only the data items of the tensor in row-major order up to the same size of the new tensor and
-     * discards the data items afterwards.
+     * discards the data items afterwards. Shape {@code []} returns an independent rank-zero empty tensor.
      */
     public JTensor<T> resize(int[] shape) {
         final int newSize = initializeSize(shape);
+        if (newSize > size) {
+            throw new InvalidArgumentException("new tensor size must not exceed the original size");
+        }
+        if (newSize == 0) {
+            return new JTensor<>(type, new int[]{});
+        }
         if (newSize == size) {
             return reshape(shape);
         }
@@ -929,7 +1099,7 @@ public class JTensor<T> {
         final Iterator<int[]> indicesIterator = indicesIterator();
         while (indicesIterator.hasNext()) {
             final T item = getItem(indicesIterator.next());
-            if (value.equals(item)) {
+            if (Objects.equals(value, item)) {
                 return true;
             }
         }
@@ -951,6 +1121,15 @@ public class JTensor<T> {
                                                          JTensor<A> tensor1,
                                                          JTensor<A> tensor2,
                                                          BiFunction<A, A, B> binaryOperation) {
+        if (resultType == null) {
+            throw new InvalidArgumentException("result type must not be null");
+        }
+        if (tensor1 == null || tensor2 == null) {
+            throw new InvalidArgumentException("operands must not be null");
+        }
+        if (binaryOperation == null) {
+            throw new InvalidArgumentException("binary operation must not be null");
+        }
         final Pair<JTensor<A>, JTensor<A>> broadcast = broadcast(tensor1, tensor2);
 
         final JTensor<A> first = broadcast.getFirst();
@@ -992,6 +1171,15 @@ public class JTensor<T> {
     public static <A, B> JTensor<B> applyFunction(Class<B> resultType,
                                                   JTensor<A> tensor,
                                                   Function<A, B> function) {
+        if (resultType == null) {
+            throw new InvalidArgumentException("result type must not be null");
+        }
+        if (tensor == null) {
+            throw new InvalidArgumentException("tensor must not be null");
+        }
+        if (function == null) {
+            throw new InvalidArgumentException("function must not be null");
+        }
         JTensor<B> result = new JTensor<>(resultType, tensor.shape);
 
         final Iterator<int[]> indicesIterator = result.indicesIterator();
@@ -1010,6 +1198,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> add(JTensor<A> tensor1,
                                                     JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1025,6 +1215,10 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> pow(JTensor<A> tensor1,
                                                     JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
+        tensor1.requireNonNullItems("Power");
+        tensor2.requireNonNullItems("Power");
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1037,6 +1231,8 @@ public class JTensor<T> {
      * @return a new tensor that is a result of taking the square root of all of its elements.
      */
     public static <A extends Number> JTensor<A> sqrt(JTensor<A> tensor) {
+        requireTensor(tensor);
+        tensor.requireNonNullItems("Square root");
         return applyFunction(
                 tensor.type,
                 tensor,
@@ -1051,6 +1247,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> subtract(JTensor<A> tensor1,
                                                          JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1066,6 +1264,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> multiply(JTensor<A> tensor1,
                                                          JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1081,6 +1281,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> divide(JTensor<A> tensor1,
                                                        JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1096,6 +1298,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> mod(JTensor<A> tensor1,
                                                     JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1111,6 +1315,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> and(JTensor<A> tensor1,
                                                     JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1126,6 +1332,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> or(JTensor<A> tensor1,
                                                    JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1141,6 +1349,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> xor(JTensor<A> tensor1,
                                                     JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1156,6 +1366,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> leftShift(JTensor<A> tensor1,
                                                           JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1171,6 +1383,8 @@ public class JTensor<T> {
      */
     public static <A extends Number> JTensor<A> rightShift(JTensor<A> tensor1,
                                                            JTensor<A> tensor2) {
+        requireTensor(tensor1);
+        requireTensor(tensor2);
         return applyBinaryOperation(
                 tensor1.type,
                 tensor1,
@@ -1183,6 +1397,7 @@ public class JTensor<T> {
      * @return a new tensor as a result of performing the binary not operation on items the tensor.
      */
     public static <A extends Number> JTensor<A> not(JTensor<A> tensor) {
+        requireTensor(tensor);
         return applyFunction(
                 tensor.type,
                 tensor,
@@ -1203,6 +1418,9 @@ public class JTensor<T> {
      * @return a flat tensor by applying the mask constructed from applying the predicate on all the items of the tensor.
      */
     public JTensor<T> filter(Predicate<T> predicate) {
+        if (predicate == null) {
+            throw new InvalidArgumentException("predicate must not be null");
+        }
         return applyMask(map(Boolean.class, predicate::test));
     }
 
@@ -1212,7 +1430,10 @@ public class JTensor<T> {
      * @return a tensor as a result of replacing items from the original tensor that satisfy the predicate.
      */
     public JTensor<T> replace(Predicate<T> replacePredicate, Function<T, T> replacer) {
-        return map(type, x -> replacePredicate.test(x) ? x : replacer.apply(x));
+        if (replacePredicate == null || replacer == null) {
+            throw new InvalidArgumentException("replace predicate and replacer must not be null");
+        }
+        return map(type, x -> replacePredicate.test(x) ? replacer.apply(x) : x);
     }
 
     /**
@@ -1220,6 +1441,14 @@ public class JTensor<T> {
      * @return a tensor with an additional dimension of shape 1 inserted at the given dimension index.
      */
     public JTensor<T> expand(int dimension) {
+        if (dimension < 0 || dimension > shape.length) {
+            throw new InvalidArgumentException("invalid dimension " + dimension
+                    + " for expansion of tensor rank " + shape.length);
+        }
+        if (shape.length == 0) {
+            throw new InvalidArgumentException(
+                    "cannot expand an empty rank-zero tensor because scalar tensors are not supported");
+        }
         int[] expandedShape = new int[this.shape.length + 1];
 
         System.arraycopy(this.shape, 0, expandedShape, 0, dimension);
@@ -1237,21 +1466,22 @@ public class JTensor<T> {
      * @return a tensor as a result of reducing all elements along the given dimension using the accumulator and
      * starting from the identity. If keepDimensions is true the new tensor will have the same number of dimensions as
      * the original one; otherwise, the new tensor will have a number of dimensions less than one from the original
-     * dimensions.
+     * dimensions. Since scalar tensors are not supported, reducing a rank-one tensor returns shape {@code [1]}.
      */
     public JTensor<T> reduceAlong(T identity,
                                   BiFunction<T, T, T> accumulator,
                                   int dimension,
                                   boolean keepDimensions) {
-        if (dimension >= shape.length || dimension < 0) {
-            throw new InvalidArgumentException("invalid dimension");
+        validateDimension(dimension);
+        if (accumulator == null) {
+            throw new InvalidArgumentException("accumulator must not be null");
         }
 
         int[] tensorShape = getShape();
         int[] resultShape = Arrays.copyOf(tensorShape, tensorShape.length);
         resultShape[dimension] = 1;
 
-        JTensor<T> result = repeat(resultShape, identity);
+        JTensor<T> result = repeat(type, resultShape, identity);
 
         Iterator<int[]> iterator = indicesIterator();
         while (iterator.hasNext()) {
@@ -1267,7 +1497,8 @@ public class JTensor<T> {
         }
 
         if (tensorShape.length == 1) {
-            throw new InvalidArgumentException("keepDimensions can not be false if the tensor has only one dimension");
+            // The library has no scalar representation; [1] is its scalar-like result.
+            return result;
         }
 
         int[] newShape = new int[tensorShape.length - 1];
@@ -1290,17 +1521,19 @@ public class JTensor<T> {
      * @param keepDimensions if true, then the result tensor will have the same number of dimensions as the original
      * @return a tensor as a result of reducing all items that the given dimension contains within the data. If
      * keepDimensions is true the new tensor will have the same number of dimensions as the original one; otherwise,
-     * the new tensor will have only the dimensions before the given dimension of the original tensor.
+     * the new tensor will have only the dimensions before the given dimension of the original tensor. When no
+     * dimensions remain, the scalar-like result has shape {@code [1]}.
      */
     public JTensor<T> reduceAll(T identity,
                                 BiFunction<T, T, T> accumulator,
                                 int dimension,
                                 boolean keepDimensions) {
-        if (dimension >= shape.length || dimension < 0) {
-            throw new InvalidArgumentException("invalid dimension");
+        validateDimension(dimension);
+        if (accumulator == null) {
+            throw new InvalidArgumentException("accumulator must not be null");
         }
 
-        JTensor<T> reduced = reshape(getTensorShapeForReducing(dimension, shape, strides))
+        JTensor<T> reduced = reshape(getTensorShapeForReducing(dimension, shape))
                 .reduceAlong(identity,
                         accumulator,
                         dimension,
@@ -1315,7 +1548,8 @@ public class JTensor<T> {
         }
 
         if (shape.length == 1) {
-            throw new InvalidArgumentException("keepDimensions can not be false if the tensor has only one dimension");
+            // The library has no scalar representation; [1] is its scalar-like result.
+            return reduced;
         }
 
         if (reduced.getShape().length == 1) {
@@ -1330,6 +1564,7 @@ public class JTensor<T> {
      * @return a tensor with indices reversed along a given dimension.
      */
     public JTensor<T> reverse(int dimension) {
+        validateDimension(dimension);
         return new JTensor<T>(this.type,
                 this.shape,
                 this.data,
@@ -1379,15 +1614,24 @@ public class JTensor<T> {
         return newIndicesTable;
     }
 
-    private int[] getTensorShapeForReducing(int dimension, int[] shape, int[] strides) {
+    private int[] getTensorShapeForReducing(int dimension, int[] shape) {
         int[] reducedShape = Arrays.copyOf(shape, dimension + 1);
-        reducedShape[dimension] = strides[dimension] * shape[dimension];
+        int collapsedDimension = 1;
+        for (int i = dimension; i < shape.length; i++) {
+            try {
+                collapsedDimension = Math.multiplyExact(collapsedDimension, shape[i]);
+            } catch (ArithmeticException exception) {
+                throw new InvalidShapeException("tensor shape is too large", exception);
+            }
+        }
+        reducedShape[dimension] = collapsedDimension;
         return reducedShape;
     }
 
     public static <T extends Number> JTensor<T> sum(JTensor<T> tensor,
                                                     int dimension,
                                                     boolean keepDimensions) {
+        requireTensor(tensor);
         return tensor.reduceAlong(
                 NumberHelper.zero(tensor.getType()),
                 (x, y) -> NumberHelper.add(tensor.getType(), x, y),
@@ -1398,6 +1642,7 @@ public class JTensor<T> {
     public static <T extends Number> JTensor<T> product(JTensor<T> tensor,
                                                         int dimension,
                                                         boolean keepDimensions) {
+        requireTensor(tensor);
         return tensor.reduceAlong(
                 NumberHelper.one(tensor.getType()),
                 (x, y) -> NumberHelper.multiply(tensor.getType(), x, y),
@@ -1408,6 +1653,7 @@ public class JTensor<T> {
     public static <T extends Number> JTensor<T> max(JTensor<T> tensor,
                                                     int dimension,
                                                     boolean keepDimensions) {
+        requireTensor(tensor);
         return tensor.reduceAlong(
                 NumberHelper.minValue(tensor.getType()),
                 (x, y) -> NumberHelper.max(tensor.getType(), x, y),
@@ -1418,6 +1664,7 @@ public class JTensor<T> {
     public static <T extends Number> JTensor<T> min(JTensor<T> tensor,
                                                     int dimension,
                                                     boolean keepDimensions) {
+        requireTensor(tensor);
         return tensor.reduceAlong(
                 NumberHelper.maxValue(tensor.getType()),
                 (x, y) -> NumberHelper.min(tensor.getType(), x, y),
@@ -1428,50 +1675,50 @@ public class JTensor<T> {
     public static <T extends Number> JTensor<T> mean(JTensor<T> tensor,
                                                      int dimension,
                                                      boolean keepDimensions) {
-        JTensor<T> countTensor = new JTensor<>(tensor.getType(), new int[]{1});
-        countTensor.setItem(
-                new int[]{0},
-                NumberHelper.cast(
-                        tensor.getType(),
-                        tensor.getShape()[tensor.getShape().length - 1]));
+        requireTensor(tensor);
+        tensor.validateDimension(dimension);
+        JTensor<T> countTensor = repeat(
+                new int[]{1},
+                NumberHelper.cast(tensor.getType(), tensor.shape[dimension]));
         return JTensor.divide(
                 sum(tensor, dimension, keepDimensions),
                 countTensor);
     }
 
     public static <T extends Number> JTensor<T> var(JTensor<T> tensor, int dimension, boolean keepDimensions) {
-        if (Arrays.equals(new int[]{1}, tensor.shape)) {
-            return zeros(tensor.getType(), new int[]{1});
-        }
-
+        requireTensor(tensor);
+        tensor.validateDimension(dimension);
         JTensor<T> countTensor = repeat(
                 new int[]{1},
-                NumberHelper.cast(
-                        tensor.getType(),
-                        tensor.getShape()[tensor.getShape().length - 1]));
+                NumberHelper.cast(tensor.getType(), tensor.shape[dimension]));
         JTensor<T> powerTensor = repeat(
                 new int[]{1},
                 NumberHelper.cast(tensor.type, 2));
 
-        JTensor<T> meanTensor = mean(tensor, dimension, keepDimensions);
+        JTensor<T> meanTensor = mean(tensor, dimension, true);
         JTensor<T> squares = JTensor.pow(subtract(tensor, meanTensor), powerTensor);
         return divide(JTensor.sum(squares, dimension, keepDimensions), countTensor);
     }
 
     public static <T extends Number> JTensor<T> std(JTensor<T> tensor, int dimension, boolean keepDimensions) {
+        requireTensor(tensor);
         return sqrt(var(tensor, dimension, keepDimensions));
     }
 
     public static <A extends Number, B extends Number> JTensor<B> cast(JTensor<A> tensor, Class<B> newType) {
+        requireTensor(tensor);
         return tensor.map(newType, x -> NumberHelper.cast(newType, x));
     }
 
     public static <A extends Number> JTensor<Boolean> castToBoolean(JTensor<A> tensor) {
+        requireTensor(tensor);
         return tensor.map(Boolean.class, x -> NumberHelper.booleanValue(tensor.getType(), x));
     }
 
     public static <A extends Number> JTensor<A> castFromBoolean(Class<A> newType,
                                                                 JTensor<Boolean> tensor) {
+        requireTensor(tensor);
+        tensor.requireNonNullItems("Boolean cast");
         return tensor.map(newType, x -> NumberHelper.cast(newType, x ? 1 : 0));
     }
 
@@ -1524,6 +1771,8 @@ public class JTensor<T> {
     }
 
     public static <A extends Number> JTensor<Boolean> booleanAnd(JTensor<Boolean> tensor1, JTensor<Boolean> tensor2) {
+        requireTensor(tensor1).requireNonNullItems("Boolean and");
+        requireTensor(tensor2).requireNonNullItems("Boolean and");
         return applyBinaryOperation(
                 Boolean.class,
                 tensor1,
@@ -1532,6 +1781,8 @@ public class JTensor<T> {
     }
 
     public static <A extends Number> JTensor<Boolean> booleanOr(JTensor<Boolean> tensor1, JTensor<Boolean> tensor2) {
+        requireTensor(tensor1).requireNonNullItems("Boolean or");
+        requireTensor(tensor2).requireNonNullItems("Boolean or");
         return applyBinaryOperation(
                 Boolean.class,
                 tensor1,
@@ -1541,6 +1792,8 @@ public class JTensor<T> {
 
 
     public static <A extends Number> JTensor<Boolean> booleanXor(JTensor<Boolean> tensor1, JTensor<Boolean> tensor2) {
+        requireTensor(tensor1).requireNonNullItems("Boolean xor");
+        requireTensor(tensor2).requireNonNullItems("Boolean xor");
         return applyBinaryOperation(
                 Boolean.class,
                 tensor1,
@@ -1550,6 +1803,7 @@ public class JTensor<T> {
 
 
     public static <A extends Number> JTensor<Boolean> booleanNot(JTensor<Boolean> tensor) {
+        requireTensor(tensor).requireNonNullItems("Boolean not");
         return applyFunction(
                 Boolean.class,
                 tensor,
@@ -1570,18 +1824,49 @@ public class JTensor<T> {
         }
     }
 
+    private static boolean isNaN(Number number) {
+        return number instanceof Float && Float.isNaN(number.floatValue())
+                || number instanceof Double && Double.isNaN(number.doubleValue());
+    }
+
     public static <A extends Number> JTensor<Integer> argMax(JTensor<A> tensor, int dimension, boolean keepDimensions) {
+        requireTensor(tensor);
         return indexBasedReduction(tensor,
                 new IndexNumberPair(-1, NumberHelper.minValue(tensor.type)),
-                (x, y) -> NumberHelper.greaterThanOrEquals(tensor.type, (A) x.getSecond(), (A) y.getSecond()) ? x : y,
+                (x, y) -> {
+                    if (x.getFirst() < 0) {
+                        return y;
+                    }
+                    if (isNaN(x.getSecond())) {
+                        return x;
+                    }
+                    if (isNaN(y.getSecond())) {
+                        return y;
+                    }
+                    return NumberHelper.compare(
+                            tensor.type, x.getSecond(), y.getSecond()) >= 0 ? x : y;
+                },
                 dimension,
                 keepDimensions);
     }
 
     public static <A extends Number> JTensor<Integer> argMin(JTensor<A> tensor, int dimension, boolean keepDimensions) {
+        requireTensor(tensor);
         return indexBasedReduction(tensor,
                 new IndexNumberPair(-1, NumberHelper.maxValue(tensor.type)),
-                (x, y) -> NumberHelper.lessThanOrEquals(tensor.type, (A) x.getSecond(), (A) y.getSecond()) ? x : y,
+                (x, y) -> {
+                    if (x.getFirst() < 0) {
+                        return y;
+                    }
+                    if (isNaN(x.getSecond())) {
+                        return x;
+                    }
+                    if (isNaN(y.getSecond())) {
+                        return y;
+                    }
+                    return NumberHelper.compare(
+                            tensor.type, x.getSecond(), y.getSecond()) <= 0 ? x : y;
+                },
                 dimension,
                 keepDimensions);
     }
@@ -1591,6 +1876,7 @@ public class JTensor<T> {
                                                                            BiFunction<IndexNumberPair, IndexNumberPair, IndexNumberPair> accumulator,
                                                                            int dimension,
                                                                            boolean keepDimensions) {
+        tensor.validateDimension(dimension);
         Iterator<int[]> iterator = tensor.indicesIterator();
         JTensor<IndexNumberPair> indicesWithNumbersTensor = tensor.map(
                 IndexNumberPair.class,
@@ -1611,11 +1897,18 @@ public class JTensor<T> {
      */
     public static <A, B> Pair<JTensor<A>, JTensor<B>> broadcast(JTensor<A> tensor1,
                                                                 JTensor<B> tensor2) {
+        if (tensor1 == null || tensor2 == null) {
+            throw new InvalidArgumentException("tensors to broadcast must not be null");
+        }
         final int[] shape1 = tensor1.shape;
         final int[] shape2 = tensor2.shape;
 
         if (Arrays.equals(shape1, shape2)) {
             return new Pair<>(tensor1, tensor2);
+        }
+        if (tensor1.size == 0 || tensor2.size == 0) {
+            throw new InvalidArgumentException(
+                    "an empty rank-zero tensor cannot be broadcast as a scalar");
         }
 
         if (!areShapesCompatible(shape1, shape2)) {
@@ -1787,10 +2080,11 @@ public class JTensor<T> {
      */
     public FloatBuffer toFloatBuffer() {
         if (Float.class.equals(this.type)) {
-            Float[] data = (Float[]) this.data;
-            FloatBuffer floatBuffer = FloatBuffer.allocate(data.length);
-            for (Float x : data) {
-                floatBuffer.put(x);
+            requireNonNullItems("Float buffer conversion");
+            FloatBuffer floatBuffer = FloatBuffer.allocate(size);
+            Iterator<int[]> iterator = indicesIterator();
+            while (iterator.hasNext()) {
+                floatBuffer.put((Float) getItem(iterator.next()));
             }
             floatBuffer.position(0);
             return floatBuffer;
@@ -1803,10 +2097,11 @@ public class JTensor<T> {
      */
     public LongBuffer toLongBuffer() {
         if (Long.class.equals(this.type)) {
-            Long[] data = (Long[]) this.data;
-            LongBuffer longBuffer = LongBuffer.allocate(data.length);
-            for (Long x : data) {
-                longBuffer.put(x);
+            requireNonNullItems("Long buffer conversion");
+            LongBuffer longBuffer = LongBuffer.allocate(size);
+            Iterator<int[]> iterator = indicesIterator();
+            while (iterator.hasNext()) {
+                longBuffer.put((Long) getItem(iterator.next()));
             }
             longBuffer.position(0);
             return longBuffer;
@@ -1819,10 +2114,11 @@ public class JTensor<T> {
      */
     public DoubleBuffer toDoubleBuffer() {
         if (Double.class.equals(this.type)) {
-            Double[] data = (Double[]) this.data;
-            DoubleBuffer doubleBuffer = DoubleBuffer.allocate(data.length);
-            for (Double x : data) {
-                doubleBuffer.put(x);
+            requireNonNullItems("Double buffer conversion");
+            DoubleBuffer doubleBuffer = DoubleBuffer.allocate(size);
+            Iterator<int[]> iterator = indicesIterator();
+            while (iterator.hasNext()) {
+                doubleBuffer.put((Double) getItem(iterator.next()));
             }
             doubleBuffer.position(0);
             return doubleBuffer;
@@ -1835,10 +2131,11 @@ public class JTensor<T> {
      */
     public IntBuffer toIntBuffer() {
         if (Integer.class.equals(this.type)) {
-            Integer[] data = (Integer[]) this.data;
-            IntBuffer intBuffer = IntBuffer.allocate(data.length);
-            for (Integer x : data) {
-                intBuffer.put(x);
+            requireNonNullItems("Integer buffer conversion");
+            IntBuffer intBuffer = IntBuffer.allocate(size);
+            Iterator<int[]> iterator = indicesIterator();
+            while (iterator.hasNext()) {
+                intBuffer.put((Integer) getItem(iterator.next()));
             }
             intBuffer.position(0);
             return intBuffer;
@@ -1869,19 +2166,29 @@ public class JTensor<T> {
             throw new InvalidTypeException("not implemented for type " + this.type.getName());
         }
 
-        int totalSize = dataType.getSize() * data.length;
-        int numberOfBytes = totalSize / 8;
-        if (totalSize % 8 > 0) {
-            numberOfBytes++;
+        Iterator<int[]> nullCheckIterator = indicesIterator();
+        while (nullCheckIterator.hasNext()) {
+            if (getItem(nullCheckIterator.next()) == null) {
+                throw new InvalidArgumentException(
+                        "cannot serialize a tensor containing null values");
+            }
         }
 
-        ByteBuffer byteBuffer = ByteBuffer.allocate(numberOfBytes + 5 + 8 * this.shape.length);
+        long totalBits = (long) dataType.getSize() * size;
+        long numberOfBytes = (totalBits + 7L) / 8L;
+        long headerBytes = 5L + 8L * shape.length;
+        long serializedBytes = numberOfBytes + headerBytes;
+        if (serializedBytes > Integer.MAX_VALUE) {
+            throw new InvalidArgumentException("serialized tensor is too large");
+        }
+
+        ByteBuffer byteBuffer = ByteBuffer.allocate((int) serializedBytes);
         byteBuffer.put(dataType.getValue());
         byteBuffer.putInt(this.shape.length);
         for (int x : shape) {
             byteBuffer.putInt(x);
         }
-        for (int x : strides) {
+        for (int x : initializeStrides(shape)) {
             byteBuffer.putInt(x);
         }
 
@@ -1939,37 +2246,61 @@ public class JTensor<T> {
     }
 
     public static JTensor<?> fromByteArray(byte[] byteArray) {
+        if (byteArray == null || byteArray.length < 5) {
+            throw new InvalidArgumentException("given byte array is invalid");
+        }
         ByteBuffer byteBuffer = ByteBuffer.wrap(byteArray);
 
-        DataType dataType = DataType.fromValue(byteBuffer.get());
+        DataType dataType;
+        try {
+            dataType = DataType.fromValue(byteBuffer.get());
+        } catch (IllegalArgumentException exception) {
+            throw new InvalidArgumentException("given byte array has an invalid data type", exception);
+        }
         int shapeLength = byteBuffer.getInt();
-        int[] shape = new int[shapeLength];
-        int[] strides = new int[shapeLength];
-
-        int size = 1;
-        for (int i = 0; i < shapeLength; i++) {
-            shape[i] = byteBuffer.getInt();
-            size *= shape[i];
+        long headerSize = 5L + 8L * shapeLength;
+        if (shapeLength < 0 || headerSize > byteArray.length) {
+            throw new InvalidArgumentException("given byte array has an invalid shape rank");
         }
 
+        int[] shape = new int[shapeLength];
         for (int i = 0; i < shapeLength; i++) {
-            strides[i] = byteBuffer.getInt();
+            shape[i] = byteBuffer.getInt();
+        }
+
+        int size;
+        try {
+            size = initializeSize(shape);
+        } catch (InvalidShapeException exception) {
+            throw new InvalidArgumentException("given byte array has an invalid tensor shape", exception);
+        }
+
+        int[] serializedStrides = new int[shapeLength];
+        for (int i = 0; i < shapeLength; i++) {
+            serializedStrides[i] = byteBuffer.getInt();
+        }
+        int[] strides = initializeStrides(shape);
+        if (!Arrays.equals(serializedStrides, strides)) {
+            throw new InvalidArgumentException("given byte array has non-contiguous tensor strides");
+        }
+
+        long payloadBits = (long) dataType.getSize() * size;
+        long expectedPayloadBytes = (payloadBits + 7L) / 8L;
+        if (byteBuffer.remaining() != expectedPayloadBytes) {
+            throw new InvalidArgumentException("given byte array has an invalid payload size");
         }
 
         if (BOOLEAN == dataType) {
             Boolean[] data = new Boolean[size];
 
             int currentIndex = 0;
-            while (byteBuffer.hasRemaining()) {
+            while (currentIndex < size) {
                 byte x = byteBuffer.get();
 
-                for (int i = 0; i < 8; i++) {
+                for (int i = 0; i < 8 && currentIndex < size; i++) {
                     data[currentIndex] = (x & 1) == 1;
                     x >>= 1;
                     currentIndex++;
-                    if (currentIndex == size) {
-                        break;
-                    }
                 }
             }
 
@@ -1983,10 +2314,8 @@ public class JTensor<T> {
         } else if (BYTE == dataType) {
             Byte[] data = new Byte[size];
 
-            int currentIndex = 0;
-            while (byteBuffer.hasRemaining()) {
-                data[currentIndex] = byteBuffer.get();
-                currentIndex++;
+            for (int i = 0; i < size; i++) {
+                data[i] = byteBuffer.get();
             }
 
             return new JTensor<>(Byte.class,
@@ -1999,10 +2328,8 @@ public class JTensor<T> {
         } else if (SHORT == dataType) {
             Short[] data = new Short[size];
 
-            int currentIndex = 0;
-            while (byteBuffer.hasRemaining()) {
-                data[currentIndex] = byteBuffer.getShort();
-                currentIndex++;
+            for (int i = 0; i < size; i++) {
+                data[i] = byteBuffer.getShort();
             }
 
             return new JTensor<>(Short.class,
@@ -2015,10 +2342,8 @@ public class JTensor<T> {
         } else if (INTEGER == dataType) {
             Integer[] data = new Integer[size];
 
-            int currentIndex = 0;
-            while (byteBuffer.hasRemaining()) {
-                data[currentIndex] = byteBuffer.getInt();
-                currentIndex++;
+            for (int i = 0; i < size; i++) {
+                data[i] = byteBuffer.getInt();
             }
 
             return new JTensor<>(Integer.class,
@@ -2031,10 +2356,8 @@ public class JTensor<T> {
         } else if (FLOAT == dataType) {
             Float[] data = new Float[size];
 
-            int currentIndex = 0;
-            while (byteBuffer.hasRemaining()) {
-                data[currentIndex] = byteBuffer.getFloat();
-                currentIndex++;
+            for (int i = 0; i < size; i++) {
+                data[i] = byteBuffer.getFloat();
             }
 
             return new JTensor<>(Float.class,
@@ -2047,10 +2370,8 @@ public class JTensor<T> {
         } else if (LONG == dataType) {
             Long[] data = new Long[size];
 
-            int currentIndex = 0;
-            while (byteBuffer.hasRemaining()) {
-                data[currentIndex] = byteBuffer.getLong();
-                currentIndex++;
+            for (int i = 0; i < size; i++) {
+                data[i] = byteBuffer.getLong();
             }
 
             return new JTensor<>(Long.class,
@@ -2063,10 +2384,8 @@ public class JTensor<T> {
         } else if (DOUBLE == dataType) {
             Double[] data = new Double[size];
 
-            int currentIndex = 0;
-            while (byteBuffer.hasRemaining()) {
-                data[currentIndex] = byteBuffer.getDouble();
-                currentIndex++;
+            for (int i = 0; i < size; i++) {
+                data[i] = byteBuffer.getDouble();
             }
 
             return new JTensor<>(Double.class,
@@ -2091,7 +2410,7 @@ public class JTensor<T> {
         final T[] raveledData = this.ravel().data;
 
         for (T number : raveledData) {
-            final int numberLength = number.toString().length();
+            final int numberLength = String.valueOf(number).length();
             if (numberLength > maxNumberLength) {
                 maxNumberLength = numberLength;
             }
@@ -2110,7 +2429,7 @@ public class JTensor<T> {
                 }
             }
 
-            final String numberRepresentation = getItem(indices).toString();
+            final String numberRepresentation = String.valueOf(getItem(indices));
             representation
                     .append(" ".repeat(maxNumberLength - numberRepresentation.length()))
                     .append(numberRepresentation);
