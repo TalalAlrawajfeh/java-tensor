@@ -236,3 +236,92 @@ rank validation, null-safe equality, and randomized view/index properties.
 ## License
 
 This project is available under the terms in [LICENSE](LICENSE).
+
+## Extended tensor operations
+
+The original static API remains available. Numeric tensors also support instance
+calls such as `a.add(b)`, `a.sum()`, and `a.matrixMultiply(b)`.
+
+```java
+JTensor<Integer> a = JTensor.arange(24).reshape(new int[]{2, 3, 4});
+JTensor<Integer> totals = a.sum(0, 2);       // shape [3]
+JTensor<Integer> kept = a.sum(new int[]{0, 2}, true);   // shape [1, 3, 1]
+JTensor<Integer> last = a.max(-1);          // shape [2, 3]
+JTensor<Integer> positions = a.argmax(0, 2);
+JTensor<Integer> reordered = a.permute(2, 0, 1);
+JTensor<Integer> selected = a.maskedSelect(a.isGreaterThan(10));
+```
+
+| Operations | Axis behavior |
+| --- | --- |
+| `sum`, `mean`, `min`, `max`, `prod`, `argmin`, `argmax`, `norm` | No arguments reduce all axes; one or several axes reduce exactly that subset. Use `operation(axes, true)`, `operation(axis, true)`, or `operation(int[], true)` to retain reduced dimensions. |
+| `squeeze()`, `squeeze(int...)`, `unsqueeze(axis)` | Remove all singleton dimensions, remove selected singleton dimensions, or insert one singleton dimension. |
+| `permute(axes...)`, `swapAxes(a,b)` | Supply a complete axis permutation, or swap two axes. |
+| `sort`, `argsort` | No arguments flatten and sort all elements. Selected axes sort each subspace jointly and preserve the input shape. |
+| `take(indices, axis)`, `gather(indices, axis)` | Select along one axis. `take(indices...)` selects from logical flattened order. |
+| `stack(axis, tensors...)`, `split`, `chunk` | Operate on one axis; the default is axis zero. |
+| `diagonal(offset, axis1, axis2)`, `trace(offset, axis1, axis2)` | Operate on two distinct axes; defaults are offset zero and the last two axes. |
+| `dotProduct(other, axes, otherAxes)` | Contract paired axis arrays, including one, several, or all axes. Empty arrays produce an outer contraction. |
+| `unique()`, `unique(axis)` | Deduplicate flattened elements or complete slices along one axis. |
+| Element-wise functions | Apply to every element, preserving shape; binary functions broadcast operands. Axis reductions do not apply. |
+
+New axis-taking methods accept negative axes, and reject duplicate or out-of-range
+axes. Selected axes are interpreted in ascending original-axis order, regardless
+of argument order. Contractions instead preserve the supplied axis pairings.
+Multi-axis `argmin`, `argmax`, and `argsort` return a row-major flat index within
+the selected subspace. Arg reductions select the first tie and first NaN.
+Sorts are stable and place NaNs last.
+
+The library retains its existing representation: positive dimension sizes,
+shape `[1]` for scalar-like results, and rank zero for empty tensors. Consequently,
+empty selections, ranges, and diagonals return rank-zero tensors. Empty global
+sums and products return zero and one; empty norms return zero. Empty means,
+min/max, and arg reductions throw `InvalidArgumentException`. The existing
+single-`int` `squeeze(axis)` still requires a nonnegative axis and rejects removing
+the sole dimension; the new all-axis and axis-array overloads retain shape
+`[1]` if all dimensions are singleton.
+
+Numeric operations support Byte, Short, Integer, Long, Float, and Double.
+Arithmetic and unary functions retain the input type, including Java overflow
+and integer truncation; use Double tensors for fractional results. Instance
+means accumulate integers exactly before dividing and converting back to the
+input type. `norm` returns Double values and computes the Euclidean norm over
+selected elements (the Frobenius norm over matrices). `round` uses nearest-even
+rounding and preserves floating NaNs and infinities. Comparisons use numeric
+semantics; equality and inequality also support nonnumeric tensors.
+
+Additional methods:
+
+- `add`, `subtract`, `multiply`, `divide`, `pow`, `mod` accept a tensor or scalar.
+  `negate`, `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `tanh`, `floor`,
+  `ceil`, and `round` are unary. `clip(lower, upper)` uses inclusive bounds.
+- `isEqual`, `isNotEqual`, `isLessThan`, `isGreaterThan`,
+  `isLessThanOrEqual`, and `isGreaterThanOrEqual` return Boolean tensors.
+- `where(condition, yes, no)` broadcasts all three operands.
+  `maskedSelect(mask)` broadcasts the mask and tensor and returns a flat selection.
+  `take` and `gather` accept negative indices; gather requires equal ranks and
+  matching sizes on every axis other than the selected axis.
+- `stack(tensors...)` inserts a new leading axis. `verticalStack` promotes vectors
+  to rows and joins axis zero; `horizontalStack` joins vectors on axis zero and
+  higher-rank tensors on axis one.
+- `split(sections, axis)` requires equal sections; `split(lengths, axis)` requires
+  positive lengths summing to the axis size. Both return lists of shared views.
+  `chunk(count, axis)` uses ceiling-sized chunks, with a possibly smaller final
+  chunk, and may return fewer chunks than requested.
+- `dotProduct(other)` takes equal-length vectors. `matrixMultiply(other)`
+  supports vectors, matrices, and tensors with broadcast batch dimensions.
+  `outerProduct(other)` flattens both inputs. Diagonal output keeps unselected
+  dimensions first and appends the diagonal dimension. Diagonals are copies.
+- `unique` preserves first occurrence order and uses Java element equality.
+- `copy()` and `flatten()` detach element storage. `permute` and `swapAxes`
+  share storage. `ravel` retains the existing reshape copy/view behavior.
+  `isContiguous()` checks consecutive physical storage in logical order;
+  `contiguous()` returns the tensor itself when contiguous, otherwise a copy.
+- `toArray()` and `toList()` return detached, flat, logical-order containers.
+  `item()` requires exactly one element; `item(indices...)` indexes an element.
+  `numberOfDimensions()`, `size()`, and `size(axis)` expose rank and sizes.
+- Factories include existing `zeros`, `ones`, and `identity`; `full`;
+  square or rectangular `eye` with an optional diagonal offset; integer and
+  double `arange` with an exclusive stop; `linspace` with optional endpoint
+  inclusion; and uniform Double `random` values in [0,1). Pass a seeded
+  `java.util.Random` to `random(generator, shape...)` for reproducibility.

@@ -3,8 +3,11 @@ package com.tensor;
 
 import java.lang.reflect.Array;
 import java.nio.*;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Random;
 import java.util.Objects;
 import java.util.function.BiFunction;
 import java.util.function.Function;
@@ -1223,7 +1226,7 @@ public class JTensor<T> {
                 tensor1.type,
                 tensor1,
                 tensor2,
-                (x, y) -> NumberHelper.cast(tensor1.type, Math.pow(x.doubleValue(), y.doubleValue())));
+                (x, y) -> NumberHelper.pow(tensor1.type, x, y));
     }
 
     /**
@@ -2478,6 +2481,1859 @@ public class JTensor<T> {
             indices[i] = i;
         }
         return indices;
+    }
+
+
+    /**
+     * Returns the number of axes. Rank-zero tensors represent empty tensors.
+     *
+     * @return the tensor rank
+     */
+    public int numberOfDimensions() {
+        return shape.length;
+    }
+
+    /**
+     * Returns the total number of elements; an alias for {@link #getSize()}.
+     *
+     * @return the total element count
+     */
+    public int size() {
+        return getSize();
+    }
+
+    /**
+     * Returns the size of one dimension. Negative dimensions count from the end.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @return the selected dimension size
+     * @throws InvalidArgumentException if dimension is out of range
+     */
+    public int size(int dimension) {
+        return shape[TensorDimensions.normalizeDimension(dimension, shape.length)];
+    }
+
+    /**
+     * Copies the elements into a flat array in logical row-major order, including for views. Element objects
+     * themselves are not cloned.
+     *
+     * @return a detached array with this tensor's runtime element type
+     */
+    public T[] toArray() {
+        return copy().getData();
+    }
+
+    /**
+     * Copies the elements into a mutable flat list in logical row-major order. Modifying the list does not
+     * modify tensor storage; element objects are shared.
+     *
+     * @return a detached list of the tensor's elements
+     */
+    public List<T> toList() {
+        return new ArrayList<>(Arrays.asList(toArray()));
+    }
+
+    /**
+     * Returns the sole element of this tensor, regardless of its shape.
+     *
+     * @return the single element
+     * @throws InvalidArgumentException if the tensor does not contain exactly one element
+     */
+    public T item() {
+        if (size != 1) {
+            throw new InvalidArgumentException("item requires exactly one element");
+        }
+        return getItem(new int[shape.length]);
+    }
+
+    /**
+     * Returns an element by its multidimensional indices; an alias for {@link #getItem(int[])}.
+     *
+     * @param indices one nonnegative index for each dimension
+     * @return the indexed element
+     * @throws InvalidArgumentException if indices is null or its length differs from the rank
+     * @throws IndexOutOfBoundsException if any index is out of range
+     */
+    public T item(int... indices) {
+        return getItem(indices);
+    }
+
+    /**
+     * Copies the tensor's shape and elements in logical row-major order. The result owns independent storage;
+     * element objects themselves are not cloned.
+     *
+     * @return a contiguous tensor with detached storage
+     */
+    public JTensor<T> copy() {
+        return new JTensor<>(this);
+    }
+
+    /**
+     * Checks whether successive logical elements occupy consecutive backing-array positions. Empty and
+     * single-element tensors are contiguous; a contiguous slice need not start at backing-array position
+     * zero.
+     *
+     * @return true if the tensor is contiguous in logical row-major order
+     */
+    public boolean isContiguous() {
+        Iterator<int[]> indicesIterator = indicesIterator();
+        if (!indicesIterator.hasNext()) {
+            return true;
+        }
+
+        int previousDataIndex = dataIndex(indicesIterator.next());
+        while (indicesIterator.hasNext()) {
+            int currentDataIndex = dataIndex(indicesIterator.next());
+            if (currentDataIndex != previousDataIndex + 1) {
+                return false;
+            }
+            previousDataIndex = currentDataIndex;
+        }
+        return true;
+    }
+
+    /**
+     * Returns this tensor when its logical elements occupy consecutive storage positions; otherwise copies it
+     * into contiguous storage.
+     *
+     * @return this tensor if contiguous, or a detached contiguous copy
+     */
+    public JTensor<T> contiguous() {
+        return isContiguous() ? this : copy();
+    }
+
+    /**
+     * Removes singleton dimensions using the copy/view rules of {@link #reshape(int[])}. Retains shape {@code [1]}
+     * if every dimension is singleton, and preserves empty tensors.
+     *
+     * @return a tensor with singleton dimensions removed
+     */
+    public JTensor<T> squeeze() {
+        if (size == 0) {
+            return copy();
+        }
+
+        int numberOfNonSingletonDimensions = 0;
+        for (int dimensionSize : shape) {
+            if (dimensionSize != 1) {
+                numberOfNonSingletonDimensions++;
+            }
+        }
+        if (numberOfNonSingletonDimensions == 0) {
+            return reshape(new int[]{1});
+        }
+
+        int[] squeezedShape = new int[numberOfNonSingletonDimensions];
+        int squeezedDimension = 0;
+        for (int dimensionSize : shape) {
+            if (dimensionSize != 1) {
+                squeezedShape[squeezedDimension++] = dimensionSize;
+            }
+        }
+        return reshape(squeezedShape);
+    }
+
+    /**
+     * Removes the selected singleton dimensions, or all singleton dimensions when dimensions is empty. Negative dimensions count from
+     * the end. The result follows reshape copy/view rules and retains shape {@code [1]} if every dimension is
+     * removed. Unlike {@link #squeeze(int)}, this dimension-array overload can remove the sole singleton dimension
+     * while retaining the scalar-like shape.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a tensor with singleton dimensions removed
+     * @throws InvalidArgumentException if dimensions is null, duplicated, out of range, or selects a nonsingleton
+     * dimension
+     */
+    public JTensor<T> squeeze(int... dimensions) {
+        if (dimensions == null) {
+            throw new InvalidArgumentException("dimensions must not be null");
+        }
+        if (dimensions.length == 0) {
+            return squeeze();
+        }
+
+        int[] normalizedDimensions = TensorDimensions.normalizeDimensions(shape.length, dimensions);
+        boolean[] removeDimension = new boolean[shape.length];
+        for (int dimension : normalizedDimensions) {
+            if (shape[dimension] != 1) {
+                throw new InvalidArgumentException(
+                        "can only squeeze singleton dimensions");
+            }
+            removeDimension[dimension] = true;
+        }
+
+        int[] squeezedShape =
+                new int[Math.max(1, shape.length - normalizedDimensions.length)];
+        Arrays.fill(squeezedShape, 1);
+        int squeezedDimension = 0;
+        for (int dimension = 0; dimension < shape.length; dimension++) {
+            if (!removeDimension[dimension]) {
+                squeezedShape[squeezedDimension++] = shape[dimension];
+            }
+        }
+        return reshape(squeezedShape);
+    }
+
+    /**
+     * Inserts a singleton dimension using {@link #expand(int)} and its reshape copy/view rules. Negative dimensions count
+     * from the end of the resulting shape.
+     *
+     * @param dimension the insertion position from zero through the current rank; negative values count from the
+     * end of the result
+     * @return a tensor with one additional singleton dimension
+     * @throws InvalidArgumentException if the insertion dimension is invalid or the tensor is rank zero
+     */
+    public JTensor<T> unsqueeze(int dimension) {
+        int normalizedDimension = TensorDimensions.normalizeDimension(dimension, shape.length + 1);
+        return expand(normalizedDimension);
+    }
+
+    /**
+     * Reorders all dimensions and returns a view sharing this tensor's backing storage. The supplied order must
+     * contain every dimension exactly once; negative dimensions count from the end.
+     *
+     * @param dimensions the complete output dimension order, containing each input dimension exactly once
+     * @return a shared view with the requested dimension order
+     * @throws InvalidArgumentException if dimensions is null, incomplete, duplicated, or out of range
+     */
+    public JTensor<T> permute(int... dimensions) {
+        if (dimensions == null || dimensions.length != shape.length) {
+            throw new InvalidArgumentException(
+                    "permutation must contain every dimension");
+        }
+
+        int[] normalizedDimensions =
+                TensorDimensions.normalizeOrderedDimensions(shape.length, dimensions);
+        int[] permutedShape = new int[shape.length];
+        for (int dimension = 0;
+                dimension < normalizedDimensions.length;
+                dimension++) {
+            permutedShape[dimension] = shape[normalizedDimensions[dimension]];
+        }
+
+        int[] permutedIndicesTable = new int[size];
+        Iterator<int[]> indicesIterator = createIndicesIterator(permutedShape);
+        int flatIndex = 0;
+        while (indicesIterator.hasNext()) {
+            int[] permutedIndices = indicesIterator.next();
+            int[] originalIndices = new int[shape.length];
+            for (int dimension = 0;
+                    dimension < normalizedDimensions.length;
+                    dimension++) {
+                originalIndices[normalizedDimensions[dimension]] =
+                        permutedIndices[dimension];
+            }
+            permutedIndicesTable[flatIndex++] = dataIndex(originalIndices);
+        }
+
+        return new JTensor<>(
+                type,
+                permutedShape,
+                data,
+                size,
+                initializeStrides(permutedShape),
+                permutedIndicesTable,
+                true);
+    }
+
+    /**
+     * Swaps two dimensions through {@link #swapDimensions(int, int)}. Negative dimensions count from the end. Mutating the
+     * returned view also changes the source tensor.
+     *
+     * @param dimension1 the first dimension; negative values count from the end
+     * @param dimension2 the second dimension; negative values count from the end
+     * @return a shared view with the two dimensions exchanged
+     * @throws InvalidArgumentException if either dimension is out of range
+     */
+    public JTensor<T> swapAxes(int dimension1, int dimension2) {
+        int normalizedDimension1 = TensorDimensions.normalizeDimension(dimension1, shape.length);
+        int normalizedDimension2 = TensorDimensions.normalizeDimension(dimension2, shape.length);
+        return swapDimensions(normalizedDimension1, normalizedDimension2);
+    }
+
+    /**
+     * Computes sums over all dimensions or the selected subset. An empty dimension array selects all dimensions. Negative dimensions
+     * count from the end. Unselected dimensions retain their original order; scalar-like results have shape
+     * {@code [1]}. Reduced dimensions are removed. Accumulation retains the input numeric type. An empty global
+     * reduction returns zero.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the sums
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> sum(int... dimensions) {
+        return TensorOperations.sum(this, false, dimensions);
+    }
+
+    /**
+     * Computes arithmetic means over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Reduced dimensions are removed. Integral values accumulate exactly before division
+     * and conversion back to the input type, truncating toward zero. Empty tensors cannot be reduced by
+     * this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the arithmetic means
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> mean(int... dimensions) {
+        return TensorOperations.mean(this, false, dimensions);
+    }
+
+    /**
+     * Computes minimum values over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Reduced dimensions are removed. Accumulation retains the input numeric type. Empty
+     * tensors cannot be reduced by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the minimum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> min(int... dimensions) {
+        return TensorOperations.min(this, false, dimensions);
+    }
+
+    /**
+     * Computes maximum values over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Reduced dimensions are removed. Accumulation retains the input numeric type. Empty
+     * tensors cannot be reduced by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the maximum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> max(int... dimensions) {
+        return TensorOperations.max(this, false, dimensions);
+    }
+
+    /**
+     * Computes products over all dimensions or the selected subset. An empty dimension array selects all dimensions. Negative
+     * dimensions count from the end. Unselected dimensions retain their original order; scalar-like results have shape
+     * {@code [1]}. Reduced dimensions are removed. Accumulation retains the input numeric type. An empty global
+     * reduction returns one.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the products
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> prod(int... dimensions) {
+        return TensorOperations.product(this, false, dimensions);
+    }
+
+    /**
+     * Computes indices of maximum values over all dimensions or the selected subset. An empty dimension array selects all
+     * dimensions. Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like
+     * results have shape {@code [1]}. Reduced dimensions are removed. Results are row-major flat indices within
+     * the selected subspace in ascending original-dimension order. The first tie and the first NaN are
+     * selected. Empty tensors cannot be reduced by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the indices of maximum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Integer> argmax(int... dimensions) {
+        return TensorOperations.argMax(this, false, dimensions);
+    }
+
+    /**
+     * Computes indices of minimum values over all dimensions or the selected subset. An empty dimension array selects all
+     * dimensions. Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like
+     * results have shape {@code [1]}. Reduced dimensions are removed. Results are row-major flat indices within
+     * the selected subspace in ascending original-dimension order. The first tie and the first NaN are
+     * selected. Empty tensors cannot be reduced by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the indices of minimum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Integer> argmin(int... dimensions) {
+        return TensorOperations.argMin(this, false, dimensions);
+    }
+
+    /**
+     * Adds corresponding elements. Operands broadcast using trailing dimensions. The result retains the input
+     * numeric type, including Java overflow and integer division behavior.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #add(JTensor, JTensor)
+     */
+    public JTensor<T> add(JTensor<T> tensor) {
+        return TensorOperations.add(this, tensor);
+    }
+
+    /**
+     * Adds corresponding elements. The scalar is broadcast to every element. The result retains the input
+     * numeric type, including Java overflow and integer division behavior.
+     *
+     * @param scalar the scalar operand of the same element type
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #add(JTensor, JTensor)
+     */
+    public JTensor<T> add(T scalar) {
+        return add(singleValue(type, scalar));
+    }
+
+    /**
+     * Subtracts the operand from this tensor element by element. Operands broadcast using trailing dimensions.
+     * The result retains the input numeric type, including Java overflow and integer division behavior.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #subtract(JTensor, JTensor)
+     */
+    public JTensor<T> subtract(JTensor<T> tensor) {
+        return TensorOperations.subtract(this, tensor);
+    }
+
+    /**
+     * Subtracts the operand from this tensor element by element. The scalar is broadcast to every element. The
+     * result retains the input numeric type, including Java overflow and integer division behavior.
+     *
+     * @param scalar the scalar operand of the same element type
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #subtract(JTensor, JTensor)
+     */
+    public JTensor<T> subtract(T scalar) {
+        return subtract(singleValue(type, scalar));
+    }
+
+    /**
+     * Multiplies corresponding elements. Operands broadcast using trailing dimensions. The result retains the
+     * input numeric type, including Java overflow and integer division behavior.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #multiply(JTensor, JTensor)
+     */
+    public JTensor<T> multiply(JTensor<T> tensor) {
+        return TensorOperations.multiply(this, tensor);
+    }
+
+    /**
+     * Multiplies corresponding elements. The scalar is broadcast to every element. The result retains the
+     * input numeric type, including Java overflow and integer division behavior.
+     *
+     * @param scalar the scalar operand of the same element type
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #multiply(JTensor, JTensor)
+     */
+    public JTensor<T> multiply(T scalar) {
+        return multiply(singleValue(type, scalar));
+    }
+
+    /**
+     * Divides this tensor by the operand element by element. Operands broadcast using trailing dimensions. The
+     * result retains the input numeric type, including Java overflow and integer division behavior.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @throws ArithmeticException if an integral divisor is zero
+     * @see #divide(JTensor, JTensor)
+     */
+    public JTensor<T> divide(JTensor<T> tensor) {
+        return TensorOperations.divide(this, tensor);
+    }
+
+    /**
+     * Divides this tensor by the operand element by element. The scalar is broadcast to every element. The
+     * result retains the input numeric type, including Java overflow and integer division behavior.
+     *
+     * @param scalar the scalar operand of the same element type
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @throws ArithmeticException if an integral divisor is zero
+     * @see #divide(JTensor, JTensor)
+     */
+    public JTensor<T> divide(T scalar) {
+        return divide(singleValue(type, scalar));
+    }
+
+    /**
+     * Raises each element of this tensor to the corresponding operand power. Operands broadcast using trailing
+     * dimensions. The result retains the input numeric type, including Java overflow and integer division
+     * behavior.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #pow(JTensor, JTensor)
+     */
+    public JTensor<T> pow(JTensor<T> tensor) {
+        return TensorOperations.pow(this, tensor);
+    }
+
+    /**
+     * Raises each element of this tensor to the corresponding operand power. The scalar is broadcast to every
+     * element. The result retains the input numeric type, including Java overflow and integer division
+     * behavior.
+     *
+     * @param scalar the scalar operand of the same element type
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #pow(JTensor, JTensor)
+     */
+    public JTensor<T> pow(T scalar) {
+        return pow(singleValue(type, scalar));
+    }
+
+    /**
+     * Computes the Java remainder of each element divided by the operand. Operands broadcast using trailing
+     * dimensions. The result retains the input numeric type, including Java overflow and integer division
+     * behavior.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @throws ArithmeticException if an integral divisor is zero
+     * @see #mod(JTensor, JTensor)
+     */
+    public JTensor<T> mod(JTensor<T> tensor) {
+        return TensorOperations.mod(this, tensor);
+    }
+
+    /**
+     * Computes the Java remainder of each element divided by the operand. The scalar is broadcast to every
+     * element. The result retains the input numeric type, including Java overflow and integer division
+     * behavior.
+     *
+     * @param scalar the scalar operand of the same element type
+     * @return a new tensor containing the element-wise results
+     * @throws InvalidArgumentException if operands contain null, numeric types differ, or shapes cannot
+     * broadcast
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @throws ArithmeticException if an integral divisor is zero
+     * @see #mod(JTensor, JTensor)
+     */
+    public JTensor<T> mod(T scalar) {
+        return mod(singleValue(type, scalar));
+    }
+
+    /**
+     * Tests equality element by element, broadcasting the tensors to a common shape. Numbers use numeric
+     * comparison (NaN is unequal to itself); other types use Java object equality, including null.
+     *
+     * @param tensor the tensor to compare with this tensor
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #equals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isEqual(JTensor<T> tensor) {
+        return TensorOperations.isEqual(this, tensor);
+    }
+
+    /**
+     * Tests equality element by element, broadcasting the scalar to every element. Numbers use numeric
+     * comparison (NaN is unequal to itself); other types use Java object equality, including null.
+     *
+     * @param scalar the scalar to compare with each element
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #equals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isEqual(T scalar) {
+        return isEqual(singleValue(type, scalar));
+    }
+
+    /**
+     * Tests inequality element by element, broadcasting the tensors to a common shape. Numbers use numeric
+     * comparison (NaN is unequal to itself); other types use Java object equality, including null.
+     *
+     * @param tensor the tensor to compare with this tensor
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #notEquals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isNotEqual(JTensor<T> tensor) {
+        return TensorOperations.isNotEqual(this, tensor);
+    }
+
+    /**
+     * Tests inequality element by element, broadcasting the scalar to every element. Numbers use numeric
+     * comparison (NaN is unequal to itself); other types use Java object equality, including null.
+     *
+     * @param scalar the scalar to compare with each element
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #notEquals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isNotEqual(T scalar) {
+        return isNotEqual(singleValue(type, scalar));
+    }
+
+    /**
+     * Tests strictly less than element by element, broadcasting the tensors to a common shape. Numeric
+     * operands retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param tensor the tensor to compare with this tensor
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #lessThan(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isLessThan(JTensor<T> tensor) {
+        return TensorOperations.isLessThan(this, tensor);
+    }
+
+    /**
+     * Tests strictly less than element by element, broadcasting the scalar to every element. Numeric operands
+     * retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param scalar the scalar to compare with each element
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #lessThan(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isLessThan(T scalar) {
+        return isLessThan(singleValue(type, scalar));
+    }
+
+    /**
+     * Tests strictly greater than element by element, broadcasting the tensors to a common shape. Numeric
+     * operands retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param tensor the tensor to compare with this tensor
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #greaterThan(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isGreaterThan(JTensor<T> tensor) {
+        return TensorOperations.isGreaterThan(this, tensor);
+    }
+
+    /**
+     * Tests strictly greater than element by element, broadcasting the scalar to every element. Numeric
+     * operands retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param scalar the scalar to compare with each element
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #greaterThan(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isGreaterThan(T scalar) {
+        return isGreaterThan(singleValue(type, scalar));
+    }
+
+    /**
+     * Tests less than or equal to element by element, broadcasting the tensors to a common shape. Numeric
+     * operands retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param tensor the tensor to compare with this tensor
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #lessThanOrEquals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isLessThanOrEqual(JTensor<T> tensor) {
+        return TensorOperations.isLessThanOrEqual(this, tensor);
+    }
+
+    /**
+     * Tests less than or equal to element by element, broadcasting the scalar to every element. Numeric
+     * operands retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param scalar the scalar to compare with each element
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #lessThanOrEquals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isLessThanOrEqual(T scalar) {
+        return isLessThanOrEqual(singleValue(type, scalar));
+    }
+
+    /**
+     * Tests greater than or equal to element by element, broadcasting the tensors to a common shape. Numeric
+     * operands retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param tensor the tensor to compare with this tensor
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #greaterThanOrEquals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isGreaterThanOrEqual(JTensor<T> tensor) {
+        return TensorOperations.isGreaterThanOrEqual(this, tensor);
+    }
+
+    /**
+     * Tests greater than or equal to element by element, broadcasting the scalar to every element. Numeric
+     * operands retain their comparison precision; comparisons with NaN are false.
+     *
+     * @param scalar the scalar to compare with each element
+     * @return a new Boolean tensor containing the comparison results
+     * @throws InvalidArgumentException if operand types or shapes are incompatible, or numeric operands
+     * contain null
+     * @see #greaterThanOrEquals(JTensor, JTensor)
+     */
+    public JTensor<Boolean> isGreaterThanOrEqual(T scalar) {
+        return isGreaterThanOrEqual(singleValue(type, scalar));
+    }
+
+    /**
+     * Negates every element, including the sign of floating zero. The result preserves the input shape and
+     * numeric type; fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> negate() {
+        return TensorOperations.negate(this);
+    }
+
+    /**
+     * Takes the absolute value of every element. Integral minimum values retain Java overflow behavior. The
+     * result preserves the input shape and numeric type; fractional results are truncated for integral
+     * types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> abs() {
+        return TensorOperations.abs(this);
+    }
+
+    /**
+     * Takes the square root of every element through the existing static square-root implementation. The
+     * result preserves the input shape and numeric type; fractional results are truncated for integral
+     * types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     * @see #sqrt(JTensor)
+     */
+    public JTensor<T> sqrt() {
+        return TensorOperations.sqrt(this);
+    }
+
+    /**
+     * Computes the natural exponential of every element. The result preserves the input shape and numeric
+     * type; fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> exp() {
+        return TensorOperations.exp(this);
+    }
+
+    /**
+     * Computes the natural logarithm of every element. The result preserves the input shape and numeric type;
+     * fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> log() {
+        return TensorOperations.log(this);
+    }
+
+    /**
+     * Computes the sine of every element, interpreted in radians. The result preserves the input shape and
+     * numeric type; fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> sin() {
+        return TensorOperations.sin(this);
+    }
+
+    /**
+     * Computes the cosine of every element, interpreted in radians. The result preserves the input shape and
+     * numeric type; fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> cos() {
+        return TensorOperations.cos(this);
+    }
+
+    /**
+     * Computes the hyperbolic tangent of every element. The result preserves the input shape and numeric type;
+     * fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> tanh() {
+        return TensorOperations.tanh(this);
+    }
+
+    /**
+     * Rounds every element toward negative infinity. The result preserves the input shape and numeric type;
+     * fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> floor() {
+        return TensorOperations.floor(this);
+    }
+
+    /**
+     * Rounds every element toward positive infinity. The result preserves the input shape and numeric type;
+     * fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> ceil() {
+        return TensorOperations.ceil(this);
+    }
+
+    /**
+     * Rounds every element to the nearest integer value, breaking ties toward the even integer. Floating NaNs,
+     * infinities, and signed zeros follow Math.rint. The result preserves the input shape and numeric
+     * type; fractional results are truncated for integral types.
+     *
+     * @return a new tensor containing the transformed values
+     * @throws InvalidArgumentException if any numeric element is null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> round() {
+        return TensorOperations.round(this);
+    }
+
+    /**
+     * Clamps every element to the inclusive interval between the supplied bounds. The result retains the input
+     * shape and numeric type; floating NaNs propagate.
+     *
+     * @param lowerBound the inclusive lower bound of the same numeric type
+     * @param upperBound the inclusive upper bound of the same numeric type
+     * @return a new tensor of clamped values
+     * @throws InvalidArgumentException if bounds are null, have incompatible types, or lower exceeds upper
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<T> clip(T lowerBound, T upperBound) {
+        return TensorOperations.clip(this, lowerBound, upperBound);
+    }
+
+    /**
+     * Chooses each element from yes or no according to condition. All three operands broadcast to a common
+     * shape using trailing-dimension broadcasting.
+     *
+     * @param <A> the element type
+     * @param condition the Boolean tensor choosing true and false values
+     * @param tensorIfTrue the tensor supplying values at true positions
+     * @param tensorIfFalse the tensor supplying values at false positions
+     * @return a new tensor containing the selected values
+     * @throws InvalidArgumentException if an operand is null, value types differ, shapes cannot broadcast, or
+     * the condition contains null
+     */
+    public static <A> JTensor<A> where(JTensor<Boolean> condition, JTensor<A> tensorIfTrue, JTensor<A> tensorIfFalse) {
+        return TensorOperations.where(condition, tensorIfTrue, tensorIfFalse);
+    }
+
+    /**
+     * Broadcasts this tensor with a Boolean mask and collects true positions in logical row-major order.
+     * Unlike {@link #applyMask(JTensor)}, this method performs element selection rather than selecting
+     * leading-dimension slices.
+     *
+     * @param mask the Boolean selection mask
+     * @return a detached flat selection, or a rank-zero empty tensor if nothing is selected
+     * @throws InvalidArgumentException if the mask is null, contains null, or cannot broadcast with this
+     * tensor
+     */
+    public JTensor<T> maskedSelect(JTensor<Boolean> mask) {
+        return TensorOperations.maskedSelect(this, mask);
+    }
+
+    /**
+     * Selects elements from the logical flattened tensor. Negative indices count from the end; duplicate
+     * indices are allowed.
+     *
+     * @param indices the indices to select; negative values count from the end
+     * @return a detached flat selection, or a rank-zero empty tensor for an empty index array
+     * @throws InvalidArgumentException if indices is null or contains an out-of-range index
+     */
+    public JTensor<T> take(int... indices) {
+        return TensorOperations.take(flatten(), indices, 0);
+    }
+
+    /**
+     * Selects slices along one dimension, preserving all other dimensions. Negative indices count from the end of
+     * that dimension; duplicates are allowed.
+     *
+     * @param indices the indices to select; negative values count from the end
+     * @param dimension the dimension to use; negative values count from the end
+     * @return a detached tensor with selected-dimension size equal to the index count, or rank-zero empty if no
+     * indices are supplied
+     * @throws InvalidArgumentException if indices is null or an dimension or index is out of range
+     */
+    public JTensor<T> take(int[] indices, int dimension) {
+        return TensorOperations.take(this, indices, dimension);
+    }
+
+    /**
+     * Selects values along one dimension using an index tensor. Indices must have the same rank and identical sizes
+     * on all other dimensions. Negative indices count from the end of the selected dimension.
+     *
+     * @param indices the Integer tensor of indices; negative values count from the end of the gather dimension
+     * @param dimension the dimension to use; negative values count from the end
+     * @return a detached tensor with the same shape as indices
+     * @throws InvalidArgumentException if the dimension or an index is invalid, indices contains null, or ranks or
+     * non-gather dimensions differ
+     */
+    public JTensor<T> gather(JTensor<Integer> indices, int dimension) {
+        return TensorOperations.gather(this, indices, dimension);
+    }
+
+    /**
+     * Stacks tensors of identical shapes and element types along a new dimension. Negative dimensions count from the end
+     * of the result shape.
+     *
+     * @param <A> the element type
+     * @param dimension the new dimension position; negative values count from the end of the resulting rank
+     * @param tensors the tensors to combine, in output order
+     * @return a detached tensor with one new dimension whose size is the number of tensors
+     * @throws InvalidArgumentException if tensors is null or empty, contains null, shapes or types differ, or
+     * the dimension is invalid
+     */
+    @SafeVarargs
+    public static <A> JTensor<A> stack(int dimension, JTensor<A>... tensors) {
+        return TensorOperations.stack(dimension, tensors);
+    }
+
+    /**
+     * Stacks tensors of identical shapes and element types along a new dimension. Negative dimensions count from the end
+     * of the result shape. This overload inserts dimension zero.
+     *
+     * @param <A> the element type
+     * @param tensors the tensors to combine, in output order
+     * @return a detached tensor with one new dimension whose size is the number of tensors
+     * @throws InvalidArgumentException if tensors is null or empty, contains null, shapes or types differ, or
+     * the dimension is invalid
+     * @see #stack(int, JTensor[])
+     */
+    @SafeVarargs
+    public static <A> JTensor<A> stack(JTensor<A>... tensors) {
+        return stack(0, tensors);
+    }
+
+    /**
+     * Promotes vectors to single-row matrices, then concatenates along dimension zero. Higher-rank tensors retain
+     * their ranks and must match outside dimension zero.
+     *
+     * @param <A> the element type
+     * @param tensors the tensors to combine, in output order
+     * @return a detached tensor containing the vertically joined inputs
+     * @throws InvalidArgumentException if inputs are missing, types differ, or shapes cannot concatenate
+     */
+    @SafeVarargs
+    public static <A> JTensor<A> verticalStack(JTensor<A>... tensors) {
+        return TensorOperations.verticalStack(tensors);
+    }
+
+    /**
+     * Concatenates vectors along dimension zero and higher-rank tensors along dimension one. Input ranks and all sizes
+     * outside the concatenation dimension must match.
+     *
+     * @param <A> the element type
+     * @param tensors the tensors to combine, in output order
+     * @return a detached tensor containing the horizontally joined inputs
+     * @throws InvalidArgumentException if inputs are missing, types differ, or shapes cannot concatenate
+     */
+    @SafeVarargs
+    public static <A> JTensor<A> horizontalStack(JTensor<A>... tensors) {
+        return TensorOperations.horizontalStack(tensors);
+    }
+
+    /**
+     * Divides one dimension into equal nonempty sections. The section count must divide the dimension size exactly.
+     * Results share storage with this tensor. This overload uses dimension zero.
+     *
+     * @param sections the number of equal sections
+     * @return an ordered list of shared tensor views
+     * @throws InvalidArgumentException if the dimension is invalid or sections is nonpositive or does not divide
+     * its size
+     * @see #split(int, int)
+     */
+    public List<JTensor<T>> split(int sections) {
+        return split(sections, 0);
+    }
+
+    /**
+     * Divides one dimension into equal nonempty sections. The section count must divide the dimension size exactly.
+     * Results share storage with this tensor.
+     *
+     * @param sections the number of equal sections
+     * @param dimension the dimension to use; negative values count from the end
+     * @return an ordered list of shared tensor views
+     * @throws InvalidArgumentException if the dimension is invalid or sections is nonpositive or does not divide
+     * its size
+     */
+    public List<JTensor<T>> split(int sections, int dimension) {
+        int dimensionSize = size(dimension);
+        if (sections <= 0 || dimensionSize % sections != 0) {
+            throw new InvalidArgumentException(
+                    "sections must divide dimension size");
+        }
+
+        int[] sectionLengths = new int[sections];
+        Arrays.fill(sectionLengths, dimensionSize / sections);
+        return split(sectionLengths, dimension);
+    }
+
+    /**
+     * Splits one dimension into the supplied positive lengths, which must sum to the dimension size. Results share
+     * storage with this tensor.
+     *
+     * @param lengths the positive section lengths, summing to the selected dimension size
+     * @param dimension the dimension to use; negative values count from the end
+     * @return an ordered list of shared tensor views
+     * @throws InvalidArgumentException if dimension is invalid, lengths is null or empty, a length is nonpositive,
+     * or their sum differs from the dimension size
+     */
+    public List<JTensor<T>> split(int[] lengths, int dimension) {
+        return TensorOperations.split(this, lengths, dimension);
+    }
+
+    /**
+     * Divides one dimension into chunks of ceiling(dimension size / chunks) elements. The final chunk may be smaller;
+     * fewer chunks may be returned than requested. Results share storage with this tensor. This overload
+     * uses dimension zero.
+     *
+     * @param chunks the requested maximum number of chunks
+     * @return an ordered list of at most the requested number of shared views
+     * @throws InvalidArgumentException if the dimension is invalid or chunks is nonpositive
+     * @see #chunk(int, int)
+     */
+    public List<JTensor<T>> chunk(int chunks) {
+        return chunk(chunks, 0);
+    }
+
+    /**
+     * Divides one dimension into chunks of ceiling(dimension size / chunks) elements. The final chunk may be smaller;
+     * fewer chunks may be returned than requested. Results share storage with this tensor.
+     *
+     * @param chunks the requested maximum number of chunks
+     * @param dimension the dimension to use; negative values count from the end
+     * @return an ordered list of at most the requested number of shared views
+     * @throws InvalidArgumentException if the dimension is invalid or chunks is nonpositive
+     */
+    public List<JTensor<T>> chunk(int chunks, int dimension) {
+        int dimensionSize = size(dimension);
+        if (chunks <= 0) {
+            throw new InvalidArgumentException("chunks must be positive");
+        }
+
+        int chunkSize = (dimensionSize - 1) / chunks + 1;
+        int numberOfChunks = (dimensionSize - 1) / chunkSize + 1;
+        int[] chunkSizes = new int[numberOfChunks];
+        Arrays.fill(chunkSizes, chunkSize);
+        chunkSizes[numberOfChunks - 1] =
+                dimensionSize - chunkSize * (numberOfChunks - 1);
+        return split(chunkSizes, dimension);
+    }
+
+    /**
+     * Computes the dot product of two equal-length numeric vectors. Multiplication and accumulation retain the
+     * input numeric type.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor of shape {@code [1]} containing the dot product
+     * @throws InvalidArgumentException if inputs are not nonempty equal-length vectors with matching numeric
+     * types
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<T> dotProduct(JTensor<T> tensor) {
+        return TensorOperations.dotProduct(this, tensor);
+    }
+
+    /**
+     * Multiplies numeric vectors, matrices, or batches of matrices. The last left dimension contracts with the
+     * second-to-last right dimension after vector promotion. Leading batch dimensions broadcast. Vector
+     * promotion dimensions are removed; a vector-vector result has shape {@code [1]}.
+     *
+     * @param tensor the tensor operand
+     * @return a new tensor containing the products in the input numeric type
+     * @throws InvalidArgumentException if inputs are empty, numeric types differ, contracted sizes differ, or
+     * batch shapes cannot broadcast
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<T> matrixMultiply(JTensor<T> tensor) {
+        return TensorOperations.matrixMultiply(this, tensor);
+    }
+
+    /**
+     * Flattens both tensors in logical row-major order and multiplies every left element by every right
+     * element.
+     *
+     * @param tensor the tensor operand
+     * @return a new matrix of shape {@code [size(), other.size()]} in the input numeric type
+     * @throws InvalidArgumentException if an input is empty or numeric types differ
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<T> outerProduct(JTensor<T> tensor) {
+        return flatten().unsqueeze(1).multiply(tensor.flatten().unsqueeze(0));
+    }
+
+    /**
+     * Copies a diagonal across two distinct dimensions. Unselected dimensions retain their original order and the diagonal
+     * dimension is appended last. Positive offsets select above the main diagonal; negative offsets select
+     * below it. This overload uses the last two dimensions and the main diagonal.
+     *
+     * @return a detached diagonal tensor, or a rank-zero empty tensor if the diagonal is outside the input
+     * @throws InvalidArgumentException if dimensions are equal or out of range
+     * @see #diagonal(int, int, int)
+     */
+    public JTensor<T> diagonal() {
+        return diagonal(0, -2, -1);
+    }
+
+    /**
+     * Copies a diagonal across two distinct dimensions. Unselected dimensions retain their original order and the diagonal
+     * dimension is appended last. Positive offsets select above the main diagonal; negative offsets select
+     * below it.
+     *
+     * @param offset the diagonal offset; zero selects the main diagonal
+     * @param dimension1 the first diagonal dimension; negative values count from the end
+     * @param dimension2 the second diagonal dimension; negative values count from the end
+     * @return a detached diagonal tensor, or a rank-zero empty tensor if the diagonal is outside the input
+     * @throws InvalidArgumentException if dimensions are equal or out of range
+     */
+    public JTensor<T> diagonal(int offset, int dimension1, int dimension2) {
+        return TensorOperations.diagonal(this, offset, dimension1, dimension2);
+    }
+
+    /**
+     * Sums a diagonal across two distinct dimensions in the input numeric type. Unselected dimensions retain their
+     * original order; if none remain, the result has shape {@code [1]}. An out-of-range diagonal
+     * contributes zero. This overload uses the last two dimensions and the main diagonal.
+     *
+     * @return a new tensor of diagonal sums
+     * @throws InvalidArgumentException if dimensions are equal or out of range
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     * @see #trace(int, int, int)
+     */
+    public JTensor<T> trace() {
+        return trace(0, -2, -1);
+    }
+
+    /**
+     * Sums a diagonal across two distinct dimensions in the input numeric type. Unselected dimensions retain their
+     * original order; if none remain, the result has shape {@code [1]}. An out-of-range diagonal
+     * contributes zero.
+     *
+     * @param offset the diagonal offset; zero selects the main diagonal
+     * @param dimension1 the first diagonal dimension; negative values count from the end
+     * @param dimension2 the second diagonal dimension; negative values count from the end
+     * @return a new tensor of diagonal sums
+     * @throws InvalidArgumentException if dimensions are equal or out of range
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<T> trace(int offset, int dimension1, int dimension2) {
+        return TensorOperations.trace(this, offset, dimension1, dimension2);
+    }
+
+    /**
+     * Computes Euclidean norms over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Reduced dimensions are removed. Returns Double values and uses a stable Euclidean
+     * calculation; reducing both matrix dimensions gives the Frobenius norm. An empty global reduction returns
+     * zero.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a new tensor containing the Euclidean norms
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Double> norm(int... dimensions) {
+        return TensorOperations.norm(this, false, dimensions);
+    }
+
+    /**
+     * Stably sorts numeric values in ascending order, with floating NaNs last. No dimensions sorts all elements into
+     * a flat tensor; selected dimensions sort each subspace jointly while preserving the original shape.
+     * Subspace coordinates use ascending original-dimension order.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a detached sorted tensor; empty inputs remain empty
+     * @throws InvalidArgumentException if dimensions is null or contains duplicates or out-of-range dimensions
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<T> sort(int... dimensions) {
+        return TensorOperations.sort(this, dimensions);
+    }
+
+    /**
+     * Returns the indices of a stable ascending sort, with floating NaNs last. No dimensions returns flat indices
+     * for the entire tensor. Selected dimensions retain the original shape and return row-major flat indices
+     * within each selected subspace, in ascending original-dimension order.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @return a detached Integer tensor of sorting indices; empty inputs remain empty
+     * @throws InvalidArgumentException if dimensions is null or contains duplicates or out-of-range dimensions
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<Integer> argsort(int... dimensions) {
+        return TensorOperations.argsort(this, dimensions);
+    }
+
+    /**
+     * Deduplicates elements in logical row-major order using Java element equality, preserving the first
+     * occurrence of each value. Null elements are allowed.
+     *
+     * @return a detached flat tensor of distinct values, or a rank-zero empty tensor
+     */
+    public JTensor<T> unique() {
+        return TensorOperations.unique(this);
+    }
+
+    /**
+     * Deduplicates complete slices along one dimension using Java element equality, preserving each slice's first
+     * occurrence. All dimensions except the selected dimension retain their sizes.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @return a detached tensor of distinct slices
+     * @throws InvalidArgumentException if dimension is out of range
+     */
+    public JTensor<T> unique(int dimension) {
+        return TensorOperations.unique(this, dimension);
+    }
+
+    /**
+     * Creates a tensor filled with the supplied value; an alias for {@link #repeat(Class, int[], Object)}.
+     * Element objects are shared, not cloned.
+     *
+     * @param <A> the element type
+     * @param type the runtime element type
+     * @param shape the desired shape; dimensions must be positive, or an empty array for an empty tensor
+     * @param value the value assigned to every element
+     * @return a new tensor of the requested shape
+     * @throws InvalidShapeException if shape is null, contains nonpositive dimensions, or its size overflows
+     * @throws InvalidArgumentException if value is incompatible with type
+     */
+    public static <A> JTensor<A> full(Class<A> type, int[] shape, A value) {
+        return repeat(type, shape, value);
+    }
+
+    /**
+     * Creates a tensor filled with value, inferring its runtime type from the non-null value; an alias for
+     * {@link #repeat(int[], Object)}. Element objects are shared, not cloned.
+     *
+     * @param <A> the element type
+     * @param shape the desired shape; dimensions must be positive, or an empty array for an empty tensor
+     * @param value the value assigned to every element
+     * @return a new tensor of the requested shape
+     * @throws InvalidShapeException if shape is null, contains nonpositive dimensions, or its size overflows
+     * @throws InvalidArgumentException if value is null
+     */
+    public static <A> JTensor<A> full(int[] shape, A value) {
+        return repeat(shape, value);
+    }
+
+    /**
+     * Creates a square identity matrix; an alias for {@link #identity(Class, int)}.
+     *
+     * @param <A> the element type, which must be a supported numeric wrapper
+     * @param type the runtime element type
+     * @param n the positive number of rows and columns
+     * @return a new matrix with ones on the selected diagonal and zeros elsewhere
+     * @throws InvalidShapeException if a matrix dimension is nonpositive or the total size overflows
+     * @throws IllegalArgumentException if type is not a supported numeric type
+     */
+    public static <A extends Number> JTensor<A> eye(Class<A> type, int n) {
+        return identity(type, n);
+    }
+
+    /**
+     * Creates a rectangular identity matrix on the requested diagonal. Positive offsets move toward the right,
+     * negative offsets toward the bottom; an out-of-range diagonal produces all zeros.
+     *
+     * @param <A> the element type, which must be a supported numeric wrapper
+     * @param type the runtime element type
+     * @param rows the positive number of rows
+     * @param columns the positive number of columns
+     * @param offset the diagonal offset; zero selects the main diagonal
+     * @return a new matrix with ones on the selected diagonal and zeros elsewhere
+     * @throws InvalidShapeException if a matrix dimension is nonpositive or the total size overflows
+     * @throws IllegalArgumentException if type is not a supported numeric type
+     */
+    public static <A extends Number> JTensor<A> eye(Class<A> type, int rows, int columns, int offset) {
+        return new JTensor<>(
+                type,
+                new int[]{rows, columns},
+                indices -> (long) indices[1] - indices[0] == offset
+                        ? NumberHelper.one(type)
+                        : NumberHelper.zero(type));
+    }
+
+    /**
+     * Creates a flat range including start and excluding stop. The direction is determined by step; a step
+     * pointing away from stop produces an empty tensor. This overload starts at zero with step one.
+     *
+     * @param stop the exclusive upper or lower bound
+     * @return a new one-dimensional range, or a rank-zero empty tensor
+     * @throws InvalidArgumentException if step is zero or the range is too large
+     */
+    public static JTensor<Integer> arange(int stop) {
+        return arange(0, stop, 1);
+    }
+
+    /**
+     * Creates a flat range including start and excluding stop. The direction is determined by step; a step
+     * pointing away from stop produces an empty tensor. This overload uses step one.
+     *
+     * @param start the first value
+     * @param stop the exclusive upper or lower bound
+     * @return a new one-dimensional range, or a rank-zero empty tensor
+     * @throws InvalidArgumentException if step is zero or the range is too large
+     */
+    public static JTensor<Integer> arange(int start, int stop) {
+        return arange(start, stop, 1);
+    }
+
+    /**
+     * Creates a flat range including start and excluding stop. The direction is determined by step; a step
+     * pointing away from stop produces an empty tensor.
+     *
+     * @param start the first value
+     * @param stop the exclusive upper or lower bound
+     * @param step the nonzero increment, which may be negative
+     * @return a new one-dimensional range, or a rank-zero empty tensor
+     * @throws InvalidArgumentException if step is zero or the range is too large
+     */
+    public static JTensor<Integer> arange(int start, int stop, int step) {
+        return TensorOperations.arange(start, stop, step);
+    }
+
+    /**
+     * Creates a flat range including start and excluding stop. The direction is determined by step; a step
+     * pointing away from stop produces an empty tensor. Bounds and step must be finite. Floating rounding
+     * follows Java double arithmetic.
+     *
+     * @param start the first value
+     * @param stop the exclusive upper or lower bound
+     * @param step the nonzero increment, which may be negative
+     * @return a new one-dimensional range, or a rank-zero empty tensor
+     * @throws InvalidArgumentException if a bound or step is nonfinite, step is zero, or the range is too
+     * large
+     */
+    public static JTensor<Double> arange(double start, double stop, double step) {
+        return TensorOperations.arange(start, stop, step);
+    }
+
+    /**
+     * Creates evenly spaced Double values between finite bounds. A count of one returns start; a count of zero
+     * returns a rank-zero empty tensor. This overload includes stop when count exceeds one.
+     *
+     * @param start the first value
+     * @param stop the final bound, included only when endpoint is true and count exceeds one
+     * @param count the nonnegative number of samples
+     * @return a new flat tensor of samples
+     * @throws InvalidArgumentException if count is negative or either bound is nonfinite
+     * @see #linspace(double, double, int, boolean)
+     */
+    public static JTensor<Double> linspace(double start, double stop, int count) {
+        return linspace(start, stop, count, true);
+    }
+
+    /**
+     * Creates evenly spaced Double values between finite bounds. A count of one returns start; a count of zero
+     * returns a rank-zero empty tensor.
+     *
+     * @param start the first value
+     * @param stop the final bound, included only when endpoint is true and count exceeds one
+     * @param count the nonnegative number of samples
+     * @param endpoint true to include stop when count is greater than one; false to exclude it
+     * @return a new flat tensor of samples
+     * @throws InvalidArgumentException if count is negative or either bound is nonfinite
+     */
+    public static JTensor<Double> linspace(double start, double stop, int count, boolean endpoint) {
+        return TensorOperations.linspace(start, stop, count, endpoint);
+    }
+
+    /**
+     * Fills a tensor with independent uniform Double samples in the interval [0, 1). Uses a newly created
+     * random generator.
+     *
+     * @param shape the desired shape; dimensions must be positive, or an empty array for an empty tensor
+     * @return a new tensor of random samples
+     * @throws InvalidShapeException if shape is null, contains nonpositive dimensions, or its size overflows
+     * @see #random(java.util.Random, int...)
+     */
+    public static JTensor<Double> random(int... shape) {
+        return random(new Random(), shape);
+    }
+
+    /**
+     * Fills a tensor with independent uniform Double samples in the interval [0, 1). Advances the supplied
+     * generator; use a seeded generator for reproducible sequences.
+     *
+     * @param random the random generator to advance; seed it for reproducible samples
+     * @param shape the desired shape; dimensions must be positive, or an empty array for an empty tensor
+     * @return a new tensor of random samples
+     * @throws InvalidShapeException if shape is null, contains nonpositive dimensions, or its size overflows
+     * @throws InvalidArgumentException if random is null
+     */
+    public static JTensor<Double> random(Random random, int... shape) {
+        if (random == null) {
+            throw new InvalidArgumentException("random generator must not be null");
+        }
+        return new JTensor<>(
+                Double.class,
+                shape,
+                indices -> random.nextDouble());
+    }
+
+    /**
+     * Contracts paired dimensions of two numeric tensors. Uncontracted left dimensions precede uncontracted right dimensions,
+     * each in their original order. Paired sizes must match, and dimension pairing follows the supplied order.
+     *
+     * @param tensor the tensor operand
+     * @param dimension the dimension to contract in this tensor; negative values count from the end
+     * @param otherDimension the dimension to contract in the other tensor; negative values count from the end
+     * @return a new tensor of contracted products in the input numeric type
+     * @throws InvalidArgumentException if inputs are empty, numeric types differ, dimensions are null, duplicated,
+     * or out of range, or paired dimension counts or sizes differ
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     * @see #dotProduct(JTensor, int[], int[])
+     */
+    public JTensor<T> dotProduct(JTensor<T> tensor, int dimension, int otherDimension) {
+        return dotProduct(tensor, new int[]{dimension}, new int[]{otherDimension});
+    }
+
+    /**
+     * Contracts paired dimensions of two numeric tensors. Uncontracted left dimensions precede uncontracted right dimensions,
+     * each in their original order. Paired sizes must match, and dimension pairing follows the supplied order.
+     * Empty dimension arrays produce an outer contraction; contracting all dimensions returns shape {@code [1]}.
+     *
+     * @param tensor the tensor operand
+     * @param dimensions this tensor's contraction dimensions in pairing order; empty selects no contraction dimensions
+     * @param otherDimensions the other tensor's dimensions paired with dimensions, in the supplied order
+     * @return a new tensor of contracted products in the input numeric type
+     * @throws InvalidArgumentException if inputs are empty, numeric types differ, dimensions are null, duplicated,
+     * or out of range, or paired dimension counts or sizes differ
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     */
+    public JTensor<T> dotProduct(JTensor<T> tensor, int[] dimensions, int[] otherDimensions) {
+        return TensorOperations.dotProduct(this, tensor, dimensions, otherDimensions);
+    }
+
+    /**
+     * Copies a diagonal across two distinct dimensions. Unselected dimensions retain their original order and the diagonal
+     * dimension is appended last. Positive offsets select above the main diagonal; negative offsets select
+     * below it. This overload uses the last two dimensions.
+     *
+     * @param offset the diagonal offset; zero selects the main diagonal
+     * @return a detached diagonal tensor, or a rank-zero empty tensor if the diagonal is outside the input
+     * @throws InvalidArgumentException if dimensions are equal or out of range
+     * @see #diagonal(int, int, int)
+     */
+    public JTensor<T> diagonal(int offset) {
+        return diagonal(offset, -2, -1);
+    }
+
+    /**
+     * Sums a diagonal across two distinct dimensions in the input numeric type. Unselected dimensions retain their
+     * original order; if none remain, the result has shape {@code [1]}. An out-of-range diagonal
+     * contributes zero. This overload uses the last two dimensions.
+     *
+     * @param offset the diagonal offset; zero selects the main diagonal
+     * @return a new tensor of diagonal sums
+     * @throws InvalidArgumentException if dimensions are equal or out of range
+     * @throws IllegalArgumentException if an element type is not a supported numeric type
+     * @see #trace(int, int, int)
+     */
+    public JTensor<T> trace(int offset) {
+        return trace(offset, -2, -1);
+    }
+
+    /**
+     * Creates a rectangular identity matrix on the main diagonal.
+     *
+     * @param <A> the element type, which must be a supported numeric wrapper
+     * @param type the runtime element type
+     * @param rows the positive number of rows
+     * @param columns the positive number of columns
+     * @return a new matrix with ones on the selected diagonal and zeros elsewhere
+     * @throws InvalidShapeException if a matrix dimension is nonpositive or the total size overflows
+     * @throws IllegalArgumentException if type is not a supported numeric type
+     */
+    public static <A extends Number> JTensor<A> eye(Class<A> type, int rows, int columns) {
+        return eye(type, rows, columns, 0);
+    }
+
+    /**
+     * Computes sums over one dimension. Negative dimensions count from the end. Unselected dimensions retain their original
+     * order; scalar-like results have shape {@code [1]}. Accumulation retains the input numeric type. An
+     * empty global reduction returns zero.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the sums
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> sum(int dimension, boolean keepDimensions) {
+        return TensorOperations.sum(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes sums over all dimensions or the selected subset. An empty dimension array selects all dimensions. Negative dimensions
+     * count from the end. Unselected dimensions retain their original order; scalar-like results have shape
+     * {@code [1]}. Accumulation retains the input numeric type. An empty global reduction returns zero.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the sums
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> sum(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.sum(
+                this,
+                keepDimensions,
+                dimensions);
+    }
+
+    /**
+     * Computes arithmetic means over one dimension. Negative dimensions count from the end. Unselected dimensions retain their
+     * original order; scalar-like results have shape {@code [1]}. Integral values accumulate exactly
+     * before division and conversion back to the input type, truncating toward zero. Empty tensors cannot
+     * be reduced by this operation.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the arithmetic means
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> mean(int dimension, boolean keepDimensions) {
+        return TensorOperations.mean(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes arithmetic means over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Integral values accumulate exactly before division and conversion back to
+     * the input type, truncating toward zero. Empty tensors cannot be reduced by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the arithmetic means
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> mean(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.mean(
+                this,
+                keepDimensions,
+                dimensions);
+    }
+
+    /**
+     * Computes minimum values over one dimension. Negative dimensions count from the end. Unselected dimensions retain their
+     * original order; scalar-like results have shape {@code [1]}. Accumulation retains the input numeric
+     * type. Empty tensors cannot be reduced by this operation.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the minimum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> min(int dimension, boolean keepDimensions) {
+        return TensorOperations.min(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes minimum values over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Accumulation retains the input numeric type. Empty tensors cannot be reduced
+     * by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the minimum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> min(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.min(
+                this,
+                keepDimensions,
+                dimensions);
+    }
+
+    /**
+     * Computes maximum values over one dimension. Negative dimensions count from the end. Unselected dimensions retain their
+     * original order; scalar-like results have shape {@code [1]}. Accumulation retains the input numeric
+     * type. Empty tensors cannot be reduced by this operation.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the maximum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> max(int dimension, boolean keepDimensions) {
+        return TensorOperations.max(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes maximum values over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Accumulation retains the input numeric type. Empty tensors cannot be reduced
+     * by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the maximum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> max(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.max(
+                this,
+                keepDimensions,
+                dimensions);
+    }
+
+    /**
+     * Computes products over one dimension. Negative dimensions count from the end. Unselected dimensions retain their original
+     * order; scalar-like results have shape {@code [1]}. Accumulation retains the input numeric type. An
+     * empty global reduction returns one.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the products
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> prod(int dimension, boolean keepDimensions) {
+        return TensorOperations.product(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes products over all dimensions or the selected subset. An empty dimension array selects all dimensions. Negative
+     * dimensions count from the end. Unselected dimensions retain their original order; scalar-like results have shape
+     * {@code [1]}. Accumulation retains the input numeric type. An empty global reduction returns one.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the products
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<T> prod(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.product(
+                this,
+                keepDimensions,
+                dimensions);
+    }
+
+    /**
+     * Computes indices of maximum values over one dimension. Negative dimensions count from the end. Unselected dimensions
+     * retain their original order; scalar-like results have shape {@code [1]}. Results are row-major flat
+     * indices within the selected subspace in ascending original-dimension order. The first tie and the first
+     * NaN are selected. Empty tensors cannot be reduced by this operation.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the indices of maximum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Integer> argmax(int dimension, boolean keepDimensions) {
+        return TensorOperations.argMax(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes indices of maximum values over all dimensions or the selected subset. An empty dimension array selects all
+     * dimensions. Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like
+     * results have shape {@code [1]}. Results are row-major flat indices within the selected subspace in
+     * ascending original-dimension order. The first tie and the first NaN are selected. Empty tensors cannot be
+     * reduced by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the indices of maximum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Integer> argmax(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.argMax(
+                this,
+                keepDimensions,
+                dimensions);
+    }
+
+    /**
+     * Computes indices of minimum values over one dimension. Negative dimensions count from the end. Unselected dimensions
+     * retain their original order; scalar-like results have shape {@code [1]}. Results are row-major flat
+     * indices within the selected subspace in ascending original-dimension order. The first tie and the first
+     * NaN are selected. Empty tensors cannot be reduced by this operation.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the indices of minimum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Integer> argmin(int dimension, boolean keepDimensions) {
+        return TensorOperations.argMin(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes indices of minimum values over all dimensions or the selected subset. An empty dimension array selects all
+     * dimensions. Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like
+     * results have shape {@code [1]}. Results are row-major flat indices within the selected subspace in
+     * ascending original-dimension order. The first tie and the first NaN are selected. Empty tensors cannot be
+     * reduced by this operation.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the indices of minimum values
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null, or the tensor is empty
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Integer> argmin(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.argMin(
+                this,
+                keepDimensions,
+                dimensions);
+    }
+
+    /**
+     * Computes Euclidean norms over one dimension. Negative dimensions count from the end. Unselected dimensions retain their
+     * original order; scalar-like results have shape {@code [1]}. Returns Double values and uses a stable
+     * Euclidean calculation; reducing both matrix dimensions gives the Frobenius norm. An empty global reduction
+     * returns zero.
+     *
+     * @param dimension the dimension to use; negative values count from the end
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the Euclidean norms
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Double> norm(int dimension, boolean keepDimensions) {
+        return TensorOperations.norm(
+                this,
+                keepDimensions,
+                dimension);
+    }
+
+    /**
+     * Computes Euclidean norms over all dimensions or the selected subset. An empty dimension array selects all dimensions.
+     * Negative dimensions count from the end. Unselected dimensions retain their original order; scalar-like results
+     * have shape {@code [1]}. Returns Double values and uses a stable Euclidean calculation; reducing both
+     * matrix dimensions gives the Frobenius norm. An empty global reduction returns zero.
+     *
+     * @param dimensions the selected dimensions; negative values count from the end and an empty array selects all dimensions
+     * @param keepDimensions true to retain each reduced dimension with size one; false to remove reduced dimensions
+     * @return a new tensor containing the Euclidean norms
+     * @throws InvalidArgumentException if dimensions are null, duplicated, or out of range, or numeric elements are
+     * null
+     * @throws IllegalArgumentException if the element type is not a supported numeric type
+     */
+    public JTensor<Double> norm(int[] dimensions, boolean keepDimensions) {
+        return TensorOperations.norm(
+                this,
+                keepDimensions,
+                dimensions);
     }
 
     private static class TensorBuilder<T> {

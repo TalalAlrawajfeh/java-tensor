@@ -29,6 +29,47 @@ public class NumberHelper {
         throw new IllegalArgumentException(TYPE_IS_NOT_SUPPORTED);
     }
 
+    public static <T extends Number> T pow(Class<T> type, T base, T exponent) {
+        validateNumbers(base, exponent);
+        if (Float.class.equals(type)) {
+            return (T) Float.valueOf(
+                    (float) Math.pow(base.floatValue(), exponent.floatValue()));
+        } else if (Double.class.equals(type)) {
+            return (T) Double.valueOf(
+                    Math.pow(base.doubleValue(), exponent.doubleValue()));
+        } else if (Integer.class.equals(type)
+                || Long.class.equals(type)
+                || Byte.class.equals(type)
+                || Short.class.equals(type)) {
+            long integralExponent = exponent.longValue();
+            if (integralExponent < 0) {
+                long integralBase = base.longValue();
+                if (integralBase == 1) {
+                    return one(type);
+                } else if (integralBase == -1) {
+                    return (integralExponent & 1) == 0
+                            ? one(type)
+                            : subtract(type, zero(type), one(type));
+                }
+                return cast(type, Math.pow(integralBase, integralExponent));
+            }
+
+            T result = one(type);
+            T currentPower = base;
+            while (integralExponent > 0) {
+                if ((integralExponent & 1) != 0) {
+                    result = multiply(type, result, currentPower);
+                }
+                integralExponent >>>= 1;
+                if (integralExponent > 0) {
+                    currentPower = multiply(type, currentPower, currentPower);
+                }
+            }
+            return result;
+        }
+        throw new IllegalArgumentException(TYPE_IS_NOT_SUPPORTED);
+    }
+
     public static <T extends Number> T subtract(Class<T> type, T first, T second) {
         validateNumbers(first, second);
         if (Integer.class.equals(type)) {
