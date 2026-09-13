@@ -48,7 +48,7 @@ arrays, while views keep a logical index mapping into their source storage.
 implementation("io.github.talalalrawajfeh:java-tensor:0.1.0")
 ```
 
-### Build From Source
+### Build from source
 
 ```bash
 git clone https://github.com/TalalAlrawajfeh/java-tensor.git
