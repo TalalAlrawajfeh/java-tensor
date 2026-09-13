@@ -53,21 +53,7 @@ implementation("io.github.talalalrawajfeh:java-tensor:0.1.0")
 ```bash
 git clone https://github.com/TalalAlrawajfeh/java-tensor.git
 cd java-tensor
-mvn clean test
-```
-
-To install the current snapshot in your local Maven repository:
-
-```bash
-mvn install
-```
-
-```xml
-<dependency>
-    <groupId>com.tensor</groupId>
-    <artifactId>java-tensor</artifactId>
-    <version>1.0-SNAPSHOT</version>
-</dependency>
+mvn clean install
 ```
 
 ## Quick start
