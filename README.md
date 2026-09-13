@@ -30,7 +30,25 @@ arrays, while views keep a logical index mapping into their source storage.
 - Java 11 or newer
 - Maven 3
 
-## Build
+## Installation
+
+### Maven
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.talalalrawajfeh/java-tensor.svg?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.talalalrawajfeh/java-tensor)
+
+```xml
+<dependency>
+  <groupId>io.github.talalalrawajfeh</groupId>
+  <artifactId>java-tensor</artifactId>
+  <version>0.1.0</version>
+</dependency>
+```
+
+### Gradle
+```gradle
+implementation("io.github.talalalrawajfeh:java-tensor:0.1.0")
+```
+
+### Build From Source
 
 ```bash
 git clone https://github.com/TalalAlrawajfeh/java-tensor.git
